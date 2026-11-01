@@ -747,6 +747,43 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
             }
         }
     }
+
+    @Test func testToolIdentifierKeepsScopedName() throws {
+        let id = try #require(CommandLineTools.Identifier(encoded: "npm:@anthropic-ai/claude-code"))
+        #expect(id.source == .npm && id.name == "@anthropic-ai/claude-code")
+        #expect(id.encoded == "npm:@anthropic-ai/claude-code")
+        #expect(CommandLineTools.Identifier(encoded: "pip:x") == nil)
+    }
+
+    @Test func testToolNameValidation() {
+        for name in ["ripgrep", "node@24", "@anthropic-ai/claude-code", "arthur-ficial/tap/apfel-gui", "graphifyy"] {
+            #expect(CommandLineTools.isValid(name: name))
+        }
+        for name in ["--force", "-g", "a b", "a;rm", "", "../x"] {
+            #expect(!CommandLineTools.isValid(name: name))
+        }
+    }
+
+    @Test func testUninstallArguments() throws {
+        let brew = CommandLineTools.Identifier(source: .brew, name: "graphviz")
+        #expect(try CommandLineTools.uninstallArguments(brew, extra: ["gts"]) == ["uninstall", "--", "graphviz", "gts"])
+        let cask = CommandLineTools.Identifier(source: .cask, name: "1password-cli")
+        #expect(try CommandLineTools.uninstallArguments(cask, extra: []) == ["uninstall", "--cask", "--", "1password-cli"])
+        let npm = CommandLineTools.Identifier(source: .npm, name: "omniroute")
+        #expect(try CommandLineTools.uninstallArguments(npm, extra: []) == ["uninstall", "-g", "--", "omniroute"])
+        let uv = CommandLineTools.Identifier(source: .uv, name: "graphifyy")
+        #expect(try CommandLineTools.uninstallArguments(uv, extra: []) == ["tool", "uninstall", "--", "graphifyy"])
+        #expect(throws: (any Error).self) { try CommandLineTools.uninstallArguments(brew, extra: ["--force"]) }
+    }
+
+    @Test func testUninstallRejectsMalformedIdentifierBeforeAnyProcess() {
+        for identifier in ["", "graphviz", "npm:", "npm:--force", "brew:a b", "pip:x"] {
+            #expect(throws: (any Error).self) { try CommandLineTools.uninstall(identifier: identifier, arguments: []) }
+        }
+        #expect(throws: (any Error).self) {
+            try CommandLineTools.uninstall(identifier: "brew:graphviz", arguments: ["--ignore-dependencies"])
+        }
+    }
 }
 
 private extension URL {
