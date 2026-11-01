@@ -12,10 +12,16 @@ public struct InstalledApp: Sendable, Hashable {
 public struct ApplicationScanner: Sendable {
     private let env: ScanEnvironment
     private let isRunning: @Sendable (String) -> Bool
+    private let commandDirectories: [URL]
 
-    public init(environment: ScanEnvironment, isRunning: @escaping @Sendable (String) -> Bool = { _ in false }) {
+    public init(
+        environment: ScanEnvironment, isRunning: @escaping @Sendable (String) -> Bool = { _ in false },
+        commandDirectories: [URL]? = nil
+    ) {
         env = environment
         self.isRunning = isRunning
+        self.commandDirectories = commandDirectories ?? (["/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"].map { URL(fileURLWithPath: $0) }
+            + [environment.home.appendingPathComponent(".local/bin")])
     }
 
     public func installedApps(in directories: [URL]) -> [InstalledApp] {
@@ -78,18 +84,35 @@ public struct ApplicationScanner: Sendable {
         return candidates.filter { FileSystem.entryExists($0) && seen.insert($0.path).inserted }
     }
 
-    /// Fichiers nommés d'après un bundle ID dont aucun éditeur n'est encore installé.
+    /// Restes sûrs d'un côté, éléments douteux de l'autre : ces derniers ne sont jamais présentés comme des restes.
     public func scanLeftovers() -> ScanResult {
         let installed = installedApps(in: env.applicationDirectories + env.systemApplicationDirectories)
-        let vendors = Set(installed.map { Self.vendor(of: $0.bundleID) })
+        let rules = LeftoverRules(
+            installedIDs: installed.map(\.bundleID) + [Bundle.main.bundleIdentifier].compactMap { $0 },
+            appNames: installed.map(\.name) + installed.map { $0.url.deletingPathExtension().lastPathComponent },
+            commands: commandDirectories.flatMap { (FileSystem.children(of: $0) ?? []).map(\.lastPathComponent) }
+        )
+        let freeNameFolders: Set<String> = ["Application Support", "Caches", "Logs"]
+        // Le nom d'un groupe ne dit pas quelles apps s'en servent.
+        let sharedFolders: Set<String> = ["Group Containers", "Application Scripts"]
         var collector = Collector()
         var items: [ScanItem] = []
-        for folder in ["Application Support", "Caches", "Containers", "Preferences", "Saved Application State", "HTTPStorages"] {
+        var doubtful: [ScanItem] = []
+        for folder in ["Application Support", "Caches", "Containers", "Group Containers", "Preferences", "Saved Application State",
+                       "HTTPStorages", "WebKit", "Application Scripts", "Logs"] {
             for url in collector.children(of: env.library.appendingPathComponent(folder)) {
                 if ScanProgress.shouldStop { break }
-                guard let bundleID = Self.bundleID(fromFileName: url.lastPathComponent),
-                      !bundleID.hasPrefix("com.apple."), !vendors.contains(Self.vendor(of: bundleID)) else { continue }
-                items.append(ScanItem(url: url, detail: "\(folder) · aucune app installée de cet éditeur", size: FileSystem.allocatedSize(of: url)))
+                let allowsFreeName = freeNameFolders.contains(folder) && FileSystem.isDirectory(url)
+                switch rules.verdict(fileName: url.lastPathComponent, allowsFreeName: allowsFreeName) {
+                case .keep:
+                    continue
+                case .leftover where sharedFolders.contains(folder):
+                    doubtful.append(ScanItem(url: url, detail: "\(folder) · partagé, l'app qui s'en sert n'est pas connue", size: FileSystem.allocatedSize(of: url)))
+                case .leftover:
+                    items.append(ScanItem(url: url, detail: "\(folder) · aucune app installée de cet éditeur", size: FileSystem.allocatedSize(of: url)))
+                case .review:
+                    doubtful.append(ScanItem(url: url, detail: "\(folder) · peut encore servir", size: FileSystem.allocatedSize(of: url)))
+                }
             }
         }
         let installers = collector.children(of: env.home.appendingPathComponent("Downloads"))
@@ -97,25 +120,12 @@ public struct ApplicationScanner: Sendable {
             .map { ScanItem(url: $0, detail: "Fichier d'installation", size: FileSystem.allocatedSize(of: $0)) }
         return ScanResult(
             categories: [
-                ScanCategory(id: "leftovers", title: "Restes d'applications", summary: "À vérifier : un outil en ligne de commande peut aussi les utiliser.", items: items.filter { $0.size > 0 }),
+                ScanCategory(id: "leftovers", title: "Restes d'applications", summary: "Aucune app installée de cet éditeur. Un outil en ligne de commande peut aussi les utiliser.", items: items),
                 ScanCategory(id: "installers", title: "Fichiers d'installation", summary: "DMG et PKG dans Téléchargements.", items: installers),
+                ScanCategory(id: "leftovers-review", title: "À vérifier", summary: "Même éditeur qu'une app installée, ou nom sans rapport connu. À retirer seulement si vous les reconnaissez.", items: doubtful),
             ],
             inaccessible: collector.denied.sorted()
         )
-    }
-
-    static func bundleID(fromFileName name: String) -> String? {
-        var value = name
-        for suffix in [".savedState", ".plist", ".binarycookies"] where value.hasSuffix(suffix) {
-            value = String(value.dropLast(suffix.count))
-        }
-        let parts = value.split(separator: ".")
-        guard parts.count >= 3, ["com", "org", "net", "io", "co", "app", "dev"].contains(parts[0].lowercased()) else { return nil }
-        return value
-    }
-
-    static func vendor(of bundleID: String) -> String {
-        bundleID.lowercased().split(separator: ".").prefix(2).joined(separator: ".")
     }
 
     private func readApp(_ url: URL) -> InstalledApp? {
