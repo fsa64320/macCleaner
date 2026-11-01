@@ -20,14 +20,16 @@ public struct CommandLineToolScanner: Sendable {
     private let env: ScanEnvironment
     private let run: CommandLineTools.Runner
     private let locations: Locations?
+    private let exclusions: Exclusions
 
     public init(
         environment: ScanEnvironment, run: @escaping CommandLineTools.Runner = CommandLineTools.run,
-        locations: Locations? = nil
+        locations: Locations? = nil, exclusions: Exclusions = Exclusions()
     ) {
         env = environment
         self.run = run
         self.locations = locations
+        self.exclusions = exclusions
     }
 
     public func scan() -> ScanResult {
@@ -56,29 +58,42 @@ public struct CommandLineToolScanner: Sendable {
     }
 
     private func brewItems(npmNames: [String]) -> [ScanItem]? {
-        guard let output = run(.brew, ["info", "--json=v2", "--installed"], Self.readTimeout),
+        guard let output = run(.brew, ["info", "--json=v2", "--installed"], Self.readTimeout), output.status == 0,
               let parsed = CommandLineToolParsers.homebrew(output.data) else { return nil }
         let root = homebrewRoot()
         func cellar(_ name: String) -> URL {
-            root.appendingPathComponent("Cellar").appendingPathComponent(String(name.split(separator: "/").last ?? ""))
+            root.appendingPathComponent("Cellar").appendingPathComponent(CommandLineTools.baseName(name))
         }
+        // Une alerte ou une exclusion vaut aussi pour une formule qui ne serait qu'une dépendance.
+        let protected = Set(parsed.formulae.filter { formula in
+            let base = CommandLineTools.baseName(formula.name)
+            return base == "uv" || Self.warning(for: base, npmNames: []) != nil || formula.pinned
+                || formula.kegCount > 1 || exclusions.covers(cellar(formula.name))
+        }.map(\.name))
         var items: [ScanItem] = []
         for formula in CommandLineToolParsers.topLevel(parsed.formulae) {
             if ScanProgress.shouldStop { return items }
             ScanProgress.current?.update(formula.name)
-            let dependencies = CommandLineToolParsers.exclusiveDependencies(of: formula.name, in: parsed.formulae)
+            let dependencies = CommandLineToolParsers.exclusiveDependencies(
+                of: formula.name, in: parsed.formulae, protected: protected
+            )
             let folder = cellar(formula.name)
-            let size = ([folder] + dependencies.map(cellar)).reduce(Int64(0)) { $0 + FileSystem.allocatedSize(of: $1) }
-            let base = String(formula.name.split(separator: "/").last ?? "")
+            let dependencyPaths = dependencies.map(cellar)
+            // Sans `--force`, brew ne retire que la version active.
+            let removed = formula.kegCount > 1 ? folder.appendingPathComponent(formula.version) : folder
+            let size = ([removed] + dependencyPaths).reduce(Int64(0)) { $0 + FileSystem.allocatedSize(of: $1) }
+            let base = CommandLineTools.baseName(formula.name)
             var detail = formula.version
             if formula.outdated { detail += " · mise à jour disponible" }
             if !dependencies.isEmpty { detail += " · emporte \(dependencies.count) dépendance(s)" }
-            if let warning = Self.warning(for: base, npmNames: npmNames) { detail += " · Attention : \(warning)" }
+            if formula.kegCount > 1 { detail += " · les anciennes versions restent installées" }
+            if formula.pinned { detail += " · épinglée : lancez d'abord brew unpin" }
             items.append(ScanItem(
                 url: folder, name: formula.name, detail: detail, size: size, removal: .commandLineTool,
                 launchLabel: CommandLineTools.Identifier(source: .brew, name: formula.name).encoded,
-                locked: base == "uv", removalArguments: dependencies,
-                reinstallCommand: "brew install \(formula.name)"
+                locked: base == "uv" || formula.pinned, removalArguments: dependencies,
+                reinstallCommand: "brew install \(formula.name)",
+                dependencyPaths: dependencyPaths, warning: Self.warning(for: base, npmNames: npmNames)
             ))
         }
         for cask in parsed.casks {
@@ -88,21 +103,29 @@ public struct CommandLineToolScanner: Sendable {
                 url: folder, name: cask.name, detail: Self.detail(cask), size: FileSystem.allocatedSize(of: folder),
                 removal: .commandLineTool,
                 launchLabel: CommandLineTools.Identifier(source: .cask, name: cask.name).encoded,
-                reinstallCommand: "brew install --cask \(cask.name)"
+                reinstallCommand: "brew install --cask \(cask.name)",
+                warning: Self.warning(for: cask.name, npmNames: [])
             ))
         }
         return items
     }
 
-    private static func warning(for base: String, npmNames: [String]) -> String? {
+    /// Vaut pour toutes les sources : `rea-agents`, par exemple, peut être un paquet npm.
+    static func warning(for base: String, npmNames: [String]) -> String? {
+        func alert(_ text: String) -> String { "Attention : \(text)" }
         if base == "node" || base.hasPrefix("node@") {
             let list = npmNames.isEmpty ? "" : " ; utilisé par les paquets npm : \(npmNames.joined(separator: ", "))"
-            return "environnement d'exécution\(list)"
+            return alert("environnement d'exécution\(list)")
         }
-        if base.hasPrefix("python@") || base.hasPrefix("openjdk") { return "environnement d'exécution" }
-        if base == "gh" { return "outil de ce dépôt" }
-        if base == "rea-agents" { return "fournit le serveur REA" }
+        if base.hasPrefix("python@") || base.hasPrefix("openjdk") { return alert("environnement d'exécution") }
+        if base == "gh" { return alert("outil de ce dépôt") }
+        if base == "rea-agents" { return alert("fournit le serveur REA") }
         return nil
+    }
+
+    /// Une version inattendue n'entre pas dans la commande : l'outil se réinstalle alors sans version.
+    static func safeVersion(_ version: String) -> String? {
+        version.range(of: "^[A-Za-z0-9._+-]+\\z", options: .regularExpression) == nil ? nil : version
     }
 
     private static func detail(_ package: InstalledPackage) -> String {
@@ -128,11 +151,12 @@ public struct CommandLineToolScanner: Sendable {
             let locked = Self.lockedNpm.contains(package.name)
             return ScanItem(
                 url: folder, name: package.name,
-                detail: Self.detail(InstalledPackage(name: package.name, version: package.version, latest: latest[package.name]))
-                    + (locked ? " · Attention : fourni avec Node" : ""),
+                detail: Self.detail(InstalledPackage(name: package.name, version: package.version, latest: latest[package.name])),
                 size: FileSystem.allocatedSize(of: folder), removal: .commandLineTool,
                 launchLabel: CommandLineTools.Identifier(source: .npm, name: package.name).encoded, locked: locked,
-                reinstallCommand: "npm install -g \(package.name)@\(package.version)"
+                reinstallCommand: "npm install -g \(package.name)" + (Self.safeVersion(package.version).map { "@\($0)" } ?? ""),
+                warning: locked ? "Attention : fourni avec Node"
+                    : Self.warning(for: CommandLineTools.baseName(package.name), npmNames: [])
             )
         }
     }
@@ -160,7 +184,8 @@ public struct CommandLineToolScanner: Sendable {
                 detail: Self.detail(InstalledPackage(name: tool.name, version: tool.version, latest: latest[tool.name])),
                 size: FileSystem.allocatedSize(of: folder), removal: .commandLineTool,
                 launchLabel: CommandLineTools.Identifier(source: .uv, name: tool.name).encoded,
-                reinstallCommand: "uv tool install \(tool.name)==\(tool.version)"
+                reinstallCommand: "uv tool install \(tool.name)" + (Self.safeVersion(tool.version).map { "==\($0)" } ?? ""),
+                warning: Self.warning(for: tool.name, npmNames: [])
             )
         }
     }

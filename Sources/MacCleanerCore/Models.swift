@@ -28,12 +28,17 @@ public struct ScanItem: Identifiable, Hashable, Sendable {
     public let removalArguments: [String]
     /// Commande qui réinstalle l'outil, gardée dans l'historique.
     public let reinstallCommand: String?
+    /// Dossiers du Cellar des dépendances qui partent avec l'outil.
+    public let dependencyPaths: [URL]
+    /// Alerte à montrer avant tout retrait. Un élément alerté n'est jamais coché en bloc.
+    public let warning: String?
 
     public init(
         url: URL, name: String? = nil, detail: String = "", size: Int64,
         selectedByDefault: Bool = false, removal: Removal = .moveToTrash,
         launchLabel: String? = nil, locked: Bool = false, companions: [URL] = [],
-        removalArguments: [String] = [], reinstallCommand: String? = nil
+        removalArguments: [String] = [], reinstallCommand: String? = nil,
+        dependencyPaths: [URL] = [], warning: String? = nil
     ) {
         self.url = url
         self.name = name ?? url.lastPathComponent
@@ -46,6 +51,8 @@ public struct ScanItem: Identifiable, Hashable, Sendable {
         self.companions = companions
         self.removalArguments = removalArguments
         self.reinstallCommand = reinstallCommand
+        self.dependencyPaths = dependencyPaths
+        self.warning = warning
     }
 }
 
@@ -63,6 +70,9 @@ public struct ScanCategory: Identifiable, Sendable {
     }
 
     public var totalSize: Int64 { items.reduce(0) { $0 + $1.size } }
+
+    /// Lignes concernées par la case de la catégorie : ni verrouillées, ni alertées.
+    public var bulkSelectableItems: [ScanItem] { items.filter { !$0.locked && $0.warning == nil } }
 }
 
 public struct ScanResult: Sendable {

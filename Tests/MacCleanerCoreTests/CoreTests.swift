@@ -861,8 +861,9 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
         #expect(String(decoding: result.data, as: UTF8.self).hasPrefix("hi"))
     }
 
-    private func formula(_ name: String, _ deps: [String] = [], onRequest: Bool = false) -> HomebrewFormula {
-        HomebrewFormula(name: name, version: "1", onRequest: onRequest, outdated: false, dependencies: deps)
+    private func formula(_ name: String, _ deps: [String] = [], onRequest: Bool = false, kegCount: Int = 1) -> HomebrewFormula {
+        HomebrewFormula(name: name, version: "1", onRequest: onRequest, outdated: false, dependencies: deps,
+                        kegCount: kegCount, pinned: false)
     }
 
     @Test func testExclusiveDependencies() {
@@ -872,8 +873,33 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
             formula("librsvg"), formula("other", ["librsvg"], onRequest: true),
             formula("kept"), formula("tool", ["kept2"], onRequest: true), formula("kept2", onRequest: true),
         ]
-        #expect(Set(CommandLineToolParsers.exclusiveDependencies(of: "graphviz", in: all)) == ["gts", "netpbm"])
-        #expect(CommandLineToolParsers.exclusiveDependencies(of: "tool", in: all).isEmpty)
+        #expect(Set(CommandLineToolParsers.exclusiveDependencies(of: "graphviz", in: all, protected: [])) == ["gts", "netpbm"])
+        #expect(CommandLineToolParsers.exclusiveDependencies(of: "tool", in: all, protected: []).isEmpty)
+    }
+
+    @Test func testExclusiveDependenciesKeepsCascadeOfSharedDependency() {
+        let all = [
+            formula("graphviz", ["A"], onRequest: true), formula("A", ["B"]), formula("B"),
+            formula("other", ["A"], onRequest: true),
+        ]
+        #expect(CommandLineToolParsers.exclusiveDependencies(of: "graphviz", in: all, protected: []).isEmpty)
+    }
+
+    @Test func testExclusiveDependenciesHandlesCycle() {
+        let all = [formula("tool", ["A"], onRequest: true), formula("A", ["B"]), formula("B", ["A", "tool"])]
+        #expect(CommandLineToolParsers.exclusiveDependencies(of: "tool", in: all, protected: []) == ["A", "B"])
+        let shared = all + [formula("other", ["B"], onRequest: true)]
+        #expect(CommandLineToolParsers.exclusiveDependencies(of: "tool", in: shared, protected: []).isEmpty)
+    }
+
+    @Test func testExclusiveDependenciesKeepsProtectedAndWhatTheyNeed() {
+        let all = [formula("tool", ["keep", "lib", "free"], onRequest: true), formula("keep", ["lib"]), formula("lib"), formula("free")]
+        #expect(CommandLineToolParsers.exclusiveDependencies(of: "tool", in: all, protected: ["keep"]) == ["free"])
+    }
+
+    @Test func testMultiKegToolTakesNoDependency() {
+        let all = [formula("tool", ["lib"], onRequest: true, kegCount: 2), formula("lib")]
+        #expect(CommandLineToolParsers.exclusiveDependencies(of: "tool", in: all, protected: []).isEmpty)
     }
 
     @Test func testTopLevelHidesDependencies() {
@@ -891,9 +917,34 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
         """
         let parsed = try #require(CommandLineToolParsers.homebrew(Data(json.utf8)))
         #expect(parsed.formulae == [HomebrewFormula(name: "user/tap/foo", version: "1.2", onRequest: true,
-                                                    outdated: true, dependencies: ["bar", "baz"])])
+                                                    outdated: true, dependencies: ["bar", "baz"],
+                                                    kegCount: 1, pinned: false)])
         #expect(parsed.casks == [InstalledPackage(name: "app", version: "2.0", latest: "3.0")])
         #expect(CommandLineToolParsers.homebrew(Data("pas du json".utf8)) == nil)
+    }
+
+    @Test func testHomebrewParsingSelectsLinkedKeg() throws {
+        let json = """
+        {"formulae":[
+          {"full_name":"lie","linked_keg":"2.0","pinned":true,"installed":[
+            {"version":"1.0","installed_on_request":false,"runtime_dependencies":[{"full_name":"old"},{"full_name":"both"}]},
+            {"version":"2.0","installed_on_request":true,"runtime_dependencies":[{"full_name":"both"}]},
+            {"version":"3.0","installed_on_request":false,"runtime_dependencies":[{"full_name":"new"}]}]},
+          {"full_name":"kegonly","linked_keg":null,"installed":[{"version":"1"},{"version":"2","installed_on_request":false}]},
+          {"full_name":"gone","linked_keg":"9","installed":[{"version":"1"},{"version":"2"}]}
+        ],"casks":[]}
+        """
+        let parsed = try #require(CommandLineToolParsers.homebrew(Data(json.utf8)))
+        let linked = parsed.formulae[0]
+        #expect(linked.version == "2.0" && linked.onRequest && linked.pinned && linked.kegCount == 3)
+        #expect(linked.dependencies == ["old", "both", "new"])
+        #expect(parsed.formulae[1].version == "2" && !parsed.formulae[1].onRequest && !parsed.formulae[1].pinned)
+        #expect(parsed.formulae[2].version == "2")
+    }
+
+    @Test func testMissingOnRequestCountsAsRequested() throws {
+        let json = #"{"formulae":[{"full_name":"x","installed":[{"version":"1"}]}],"casks":[]}"#
+        #expect(try #require(CommandLineToolParsers.homebrew(Data(json.utf8))).formulae.first?.onRequest == true)
     }
 
     @Test func testNpmParsing() throws {
@@ -947,22 +998,23 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
     private static let uvOutdatedText = "graphifyy v0.9.95 [latest: 0.9.100]\n- graphify\n"
 
     private func toolRunner(
-        npmOutdatedFails: Bool = false, uv: Bool = true
+        npmOutdatedFails: Bool = false, uv: Bool = true, brewJSON: String = CoreTests.brewJSON, brewStatus: Int32 = 0,
+        npmJSON: String = CoreTests.npmJSON, uvText: String = CoreTests.uvText
     ) -> CommandLineTools.Runner {
         { source, arguments, _ in
             func out(_ text: String, _ status: Int32 = 0) -> Docker.Output { Docker.Output(data: Data(text.utf8), status: status) }
             switch (source, arguments.joined(separator: " ")) {
-            case (.brew, "info --json=v2 --installed"): return out(CoreTests.brewJSON)
-            case (.npm, "ls -g --depth=0 --json"): return out(CoreTests.npmJSON)
+            case (.brew, "info --json=v2 --installed"): return out(brewJSON, brewStatus)
+            case (.npm, "ls -g --depth=0 --json"): return out(npmJSON)
             case (.npm, "outdated -g --json"): return npmOutdatedFails ? nil : Docker.Output(data: Data(CoreTests.npmOutdatedJSON.utf8), status: 1)
-            case (.uv, "tool list --show-paths"): return uv ? out(CoreTests.uvText) : nil
+            case (.uv, "tool list --show-paths"): return uv ? out(uvText) : nil
             case (.uv, "tool list --outdated"): return uv ? out(CoreTests.uvOutdatedText) : nil
             default: return nil
             }
         }
     }
 
-    private func toolScan(_ run: @escaping CommandLineTools.Runner) throws -> ScanResult {
+    private func toolScan(_ run: @escaping CommandLineTools.Runner, exclusions: Exclusions = Exclusions()) throws -> ScanResult {
         for folder in ["brew/Cellar/ripgrep", "brew/Cellar/pcre2", "brew/Cellar/apfel-gui"] {
             try write("\(folder)/file.bin", bytes: 20_000)
         }
@@ -970,7 +1022,7 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
             homebrew: home.appendingPathComponent("brew"), npmRoot: home.appendingPathComponent("npm"),
             uvTools: home.appendingPathComponent("uv")
         )
-        return CommandLineToolScanner(environment: env, run: run, locations: locations).scan()
+        return CommandLineToolScanner(environment: env, run: run, locations: locations, exclusions: exclusions).scan()
     }
 
     private func toolItem(_ result: ScanResult, _ category: String, _ label: String) -> ScanItem? {
@@ -1013,11 +1065,117 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
     @Test func testToolScanWarnsForRuntimes() throws {
         let result = try toolScan(toolRunner())
         let node = try #require(toolItem(result, "cli.brew", "brew:node@24"))
-        #expect(node.detail.contains("omniroute"))
-        #expect(!node.detail.contains("corepack"))
+        #expect(node.warning?.contains("omniroute") == true)
+        #expect(node.warning?.contains("corepack") == false)
+        #expect(!node.detail.contains("Attention"))
         for label in ["brew:python@3.14", "brew:openjdk@21", "brew:gh", "brew:rea-agents"] {
-            #expect(try #require(toolItem(result, "cli.brew", label)).detail.contains("Attention"))
+            let item = try #require(toolItem(result, "cli.brew", label))
+            #expect(item.warning?.contains("Attention") == true)
+            #expect(!item.detail.contains("Attention"))
         }
+        #expect(try #require(toolItem(result, "cli.brew", "brew:ripgrep")).warning == nil)
+        #expect(try #require(toolItem(result, "cli.npm", "npm:npm")).warning?.contains("Node") == true)
+    }
+
+    @Test func testToolScanWarnsForAllSources() throws {
+        let npm = #"{"dependencies":{"rea-agents":{"version":"6.8.0"},"@scope/rea-agents":{"version":"1.0.0"},"omniroute":{"version":"1.0.0"}}}"#
+        let brew = #"{"formulae":[],"casks":[{"token":"gh","version":"1","outdated":false,"installed":"1"}]}"#
+        let result = try toolScan(toolRunner(brewJSON: brew, npmJSON: npm, uvText: "rea-agents v1.0.0 (/x)\ngraphifyy v1.0.0 (/y)\n"))
+        #expect(try #require(toolItem(result, "cli.npm", "npm:rea-agents")).warning?.contains("REA") == true)
+        #expect(try #require(toolItem(result, "cli.npm", "npm:@scope/rea-agents")).warning?.contains("REA") == true)
+        #expect(try #require(toolItem(result, "cli.npm", "npm:omniroute")).warning == nil)
+        #expect(try #require(toolItem(result, "cli.uv", "uv:rea-agents")).warning?.contains("REA") == true)
+        #expect(try #require(toolItem(result, "cli.uv", "uv:graphifyy")).warning == nil)
+        #expect(try #require(toolItem(result, "cli.brew", "cask:gh")).warning != nil)
+    }
+
+    private func keg(_ name: String, onRequest: Bool = false, deps: [String] = [], extra: String = "") -> String {
+        let list = deps.map { #"{"full_name":"\#($0)"}"# }.joined(separator: ",")
+        return #"{"full_name":"\#(name)"\#(extra),"installed":[{"version":"1","installed_on_request":\#(onRequest),"runtime_dependencies":[\#(list)]}]}"#
+    }
+
+    private func brewList(_ formulae: [String]) -> String {
+        #"{"formulae":[\#(formulae.joined(separator: ","))],"casks":[]}"#
+    }
+
+    @Test func testProtectedDependenciesStayInstalled() throws {
+        let names = ["uv", "node@24", "python@3.14", "openjdk@21", "gh", "rea-agents", "plain"]
+        let json = brewList([keg("tool", onRequest: true, deps: names)] + names.map { keg($0) })
+        let item = try #require(toolItem(try toolScan(toolRunner(brewJSON: json)), "cli.brew", "brew:tool"))
+        #expect(item.removalArguments == ["plain"])
+    }
+
+    @Test func testDependencyOfProtectedFormulaStays() throws {
+        let json = brewList([
+            keg("tool", onRequest: true, deps: ["python@3.14", "libffi", "plain"]),
+            keg("python@3.14", deps: ["libffi"]), keg("libffi"), keg("plain"),
+        ])
+        let item = try #require(toolItem(try toolScan(toolRunner(brewJSON: json)), "cli.brew", "brew:tool"))
+        #expect(item.removalArguments == ["plain"])
+    }
+
+    @Test func testPinnedAndMultiKegDependenciesStay() throws {
+        let multi = #"{"full_name":"multi","linked_keg":"2","installed":[{"version":"1","installed_on_request":false},{"version":"2","installed_on_request":false}]}"#
+        let json = brewList([
+            keg("tool", onRequest: true, deps: ["pinned-lib", "multi", "plain"]),
+            keg("pinned-lib", extra: #","pinned":true"#), multi, keg("plain"),
+        ])
+        let item = try #require(toolItem(try toolScan(toolRunner(brewJSON: json)), "cli.brew", "brew:tool"))
+        #expect(item.removalArguments == ["plain"])
+    }
+
+    @Test func testExcludedDependencyStaysAndItsNeedsToo() throws {
+        let json = brewList([
+            keg("tool", onRequest: true, deps: ["libfoo", "libbar", "plain"]),
+            keg("libfoo", deps: ["libbar"]), keg("libbar"), keg("plain"),
+        ])
+        var exclusions = Exclusions()
+        exclusions.add(home.appendingPathComponent("brew/Cellar/libfoo"))
+        let item = try #require(toolItem(try toolScan(toolRunner(brewJSON: json), exclusions: exclusions), "cli.brew", "brew:tool"))
+        #expect(item.removalArguments == ["plain"])
+        #expect(item.dependencyPaths == [home.appendingPathComponent("brew/Cellar/plain")])
+    }
+
+    @Test func testMultiKegToolCountsOnlySelectedKeg() throws {
+        try write("brew/Cellar/multi/1/old.bin", bytes: 400_000)
+        try write("brew/Cellar/multi/2/new.bin", bytes: 20_000)
+        try write("brew/Cellar/lib/1/f.bin", bytes: 400_000)
+        let multi = #"{"full_name":"multi","linked_keg":"2","installed":[{"version":"1","installed_on_request":true,"runtime_dependencies":[{"full_name":"lib"}]},{"version":"2","installed_on_request":true,"runtime_dependencies":[{"full_name":"lib"}]}]}"#
+        let item = try #require(toolItem(try toolScan(toolRunner(brewJSON: brewList([multi, keg("lib")]))), "cli.brew", "brew:multi"))
+        #expect(item.size == FileSystem.allocatedSize(of: home.appendingPathComponent("brew/Cellar/multi/2")))
+        #expect(item.detail.contains("les anciennes versions restent installées"))
+        #expect(item.removalArguments.isEmpty && item.dependencyPaths.isEmpty)
+        #expect(!item.locked)
+    }
+
+    @Test func testPinnedToolIsLocked() throws {
+        let json = brewList([keg("tool", onRequest: true, extra: #","pinned":true"#)])
+        let item = try #require(toolItem(try toolScan(toolRunner(brewJSON: json)), "cli.brew", "brew:tool"))
+        #expect(item.locked)
+        #expect(item.detail.contains("épinglée"))
+    }
+
+    @Test func testBrewFailureHidesCategory() throws {
+        let result = try toolScan(toolRunner(brewStatus: 1))
+        #expect(!result.categories.map(\.id).contains("cli.brew"))
+    }
+
+    @Test func testReinstallCommandOmitsUnsafeVersion() throws {
+        let npm = #"{"dependencies":{"a":{"version":"1.0.0; rm -rf ~"},"b":{"version":"1.0.0+build"}}}"#
+        let result = try toolScan(toolRunner(npmJSON: npm, uvText: "x v1;2 (/x)\n"))
+        #expect(try #require(toolItem(result, "cli.npm", "npm:a")).reinstallCommand == "npm install -g a")
+        #expect(try #require(toolItem(result, "cli.npm", "npm:b")).reinstallCommand == "npm install -g b@1.0.0+build")
+        #expect(try #require(toolItem(result, "cli.uv", "uv:x")).reinstallCommand == "uv tool install x")
+        #expect(CommandLineToolScanner.safeVersion("1.0\n") == nil)
+    }
+
+    @Test func testBulkSelectionSkipsLockedAndWarned() {
+        let category = ScanCategory(id: "c", title: "C", items: [
+            ScanItem(url: home.appendingPathComponent("plain"), size: 1),
+            ScanItem(url: home.appendingPathComponent("warned"), size: 1, warning: "Attention : x"),
+            ScanItem(url: home.appendingPathComponent("locked"), size: 1, locked: true),
+        ])
+        #expect(category.bulkSelectableItems.map(\.name) == ["plain"])
     }
 
     @Test func testToolScanShowsUpdates() throws {

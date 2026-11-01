@@ -5,7 +5,9 @@ struct HomebrewFormula: Equatable {
     let version: String
     let onRequest: Bool
     let outdated: Bool
-    let dependencies: [String]  // full_name des runtime_dependencies
+    let dependencies: [String]  // full_name des runtime_dependencies, toutes versions confondues
+    let kegCount: Int           // versions installées côte à côte
+    let pinned: Bool
 }
 
 struct InstalledPackage: Equatable {
@@ -21,15 +23,26 @@ enum CommandLineToolParsers {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         let formulae = (json["formulae"] as? [[String: Any]] ?? []).compactMap { entry -> HomebrewFormula? in
             guard let name = entry["full_name"] as? String,
-                  let installed = (entry["installed"] as? [[String: Any]])?.first else { return nil }
-            let dependencies = (installed["runtime_dependencies"] as? [[String: Any]] ?? [])
-                .compactMap { $0["full_name"] as? String }
+                  let kegs = entry["installed"] as? [[String: Any]],
+                  let newest = kegs.last else { return nil }
+            // `installed` est trié par version croissante : la version active est `linked_keg`, sinon la dernière.
+            let linked = entry["linked_keg"] as? String
+            let selected = kegs.first { $0["version"] as? String == linked } ?? newest
+            var dependencies: [String] = []
+            for keg in kegs {
+                for dependency in keg["runtime_dependencies"] as? [[String: Any]] ?? [] {
+                    if let name = dependency["full_name"] as? String, !dependencies.contains(name) { dependencies.append(name) }
+                }
+            }
             return HomebrewFormula(
                 name: name,
-                version: installed["version"] as? String ?? "?",
-                onRequest: installed["installed_on_request"] as? Bool ?? false,
+                version: selected["version"] as? String ?? "?",
+                // Sans l'information, la formule compte comme demandée : elle ne partira pas en dépendance.
+                onRequest: selected["installed_on_request"] as? Bool ?? true,
                 outdated: entry["outdated"] as? Bool ?? false,
-                dependencies: dependencies
+                dependencies: dependencies,
+                kegCount: kegs.count,
+                pinned: entry["pinned"] as? Bool ?? false
             )
         }
         let casks = (json["casks"] as? [[String: Any]] ?? []).compactMap { entry -> InstalledPackage? in
@@ -53,9 +66,14 @@ enum CommandLineToolParsers {
     }
 
     /// Dépendances de `tool` qui peuvent partir avec lui : ni demandées par l'utilisateur,
-    /// ni requises par une formule qui reste installée.
-    static func exclusiveDependencies(of tool: String, in formulae: [HomebrewFormula]) -> [String] {
+    /// ni protégées, ni requises par une formule qui reste installée. Une formule protégée reste,
+    /// donc ce qu'elle requiert reste aussi. Un outil à plusieurs versions garde ses anciennes
+    /// versions, qui requièrent encore leurs dépendances : rien ne part avec lui.
+    static func exclusiveDependencies(
+        of tool: String, in formulae: [HomebrewFormula], protected: Set<String>
+    ) -> [String] {
         let byName = Dictionary(formulae.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
+        if byName[tool]?.kegCount ?? 1 > 1 { return [] }
         // Fermeture transitive, limitée aux formules installées.
         var closure = Set<String>()
         var pending = byName[tool]?.dependencies ?? []
@@ -63,7 +81,7 @@ enum CommandLineToolParsers {
             guard next != tool, let formula = byName[next], closure.insert(next).inserted else { continue }
             pending.append(contentsOf: formula.dependencies)
         }
-        var candidates = closure.filter { byName[$0]?.onRequest == false }
+        var candidates = closure.filter { byName[$0]?.onRequest == false && !protected.contains($0) }
         var changed = true
         while changed {
             changed = false
