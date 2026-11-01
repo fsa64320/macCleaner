@@ -46,7 +46,7 @@ enum Module: String, CaseIterable, Identifiable {
         case .cliTools: "Homebrew, npm et uv : retirez ce qui ne sert plus."
         case .privacy: "Traces des navigateurs et permissions accordées aux apps."
         case .cloud: "Libérez des copies locales, ou connectez un compte pour le nettoyer."
-        case .updates: "Homebrew, mises à jour intégrées et App Store."
+        case .updates: "Homebrew, npm, uv, mises à jour intégrées et App Store."
         case .monitoring: "Alertes et menu bar. La surveillance ne supprime jamais rien."
         case .history: "Ce qui a été retiré, et quand."
         case .exclusions: "Ce que macCleaner ne doit jamais proposer ni retirer."

@@ -5,6 +5,7 @@ public struct AppUpdate: Identifiable, Sendable, Equatable {
         case homebrew(token: String, isCask: Bool)
         case sparkle(app: URL)
         case appStore(page: URL)
+        case commandLine(CommandLineTools.Identifier)
     }
 
     public var id: String { "\(name)-\(latest)" }
@@ -18,7 +19,30 @@ public struct AppUpdate: Identifiable, Sendable, Equatable {
         case .homebrew: "Homebrew"
         case .sparkle: "Mise à jour intégrée"
         case .appStore: "App Store"
+        case .commandLine(let tool): tool.source.rawValue
         }
+    }
+}
+
+extension AppUpdate {
+    /// Sparkle et l'App Store se mettent à jour hors de macCleaner.
+    public var isInstallable: Bool {
+        switch source {
+        case .homebrew, .commandLine: true
+        case .sparkle, .appStore: false
+        }
+    }
+
+    /// Homebrew d'abord, car il peut mettre à jour Node ; `npm` en dernier, car il sert aux autres paquets.
+    public static func installQueue(_ updates: [AppUpdate]) -> [AppUpdate] {
+        let rank: (AppUpdate) -> Int = { update in
+            guard case .commandLine(let tool) = update.source else { return 0 }
+            if tool.source == .npm { return tool.name == "npm" ? 3 : 1 }
+            return 2
+        }
+        return updates.filter(\.isInstallable).enumerated()
+            .sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }
+            .map(\.element)
     }
 }
 
@@ -43,20 +67,25 @@ public struct UpdateScanner: Sendable {
     private let env: ScanEnvironment
     private let fetch: @Sendable (URL) -> Data?
     private let brewOutdated: @Sendable () -> Data?
+    private let toolRunner: CommandLineTools.Runner
 
     public init(
         environment: ScanEnvironment,
         fetch: @escaping @Sendable (URL) -> Data? = UpdateScanner.download,
-        brewOutdated: @escaping @Sendable () -> Data? = Homebrew.outdated
+        brewOutdated: @escaping @Sendable () -> Data? = Homebrew.outdated,
+        toolRunner: @escaping CommandLineTools.Runner = CommandLineTools.run
     ) {
         env = environment
         self.fetch = fetch
         self.brewOutdated = brewOutdated
+        self.toolRunner = toolRunner
     }
 
     public func scan() -> [AppUpdate] {
         ScanProgress.current?.update("Interrogation de Homebrew")
         let brew = brewOutdated().map(Self.parseBrew) ?? []
+        ScanProgress.current?.update("Interrogation de npm et uv")
+        let tools = commandLineUpdates()
         let apps = ApplicationScanner(environment: env).installedApps(in: env.applicationDirectories)
             .filter { !$0.bundleID.hasPrefix("com.apple.") }
         let lock = NSLock()
@@ -75,7 +104,27 @@ public struct UpdateScanner: Sendable {
         // Une app gérée par Homebrew se met à jour par Homebrew.
         let brewNames = Set(brew.map { Self.normalized($0.name) })
         let others = found.filter { !brewNames.contains(Self.normalized($0.name)) }
-        return (brew + others).sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        return (brew + tools + others).sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// `npm outdated` sort avec le statut 1 quand il trouve des paquets : seul le JSON fait foi.
+    private func commandLineUpdates() -> [AppUpdate] {
+        let timeout: TimeInterval = 60
+        let npm = toolRunner(.npm, ["outdated", "-g", "--json"], timeout).flatMap { CommandLineToolParsers.npmOutdatedPackages($0.data) } ?? []
+        let uvOutput = toolRunner(.uv, ["tool", "list", "--outdated"], timeout).flatMap { $0.status == 0 ? $0 : nil }
+        let uv = uvOutput.map { CommandLineToolParsers.uvOutdatedPackages(String(decoding: $0.data, as: UTF8.self)) } ?? []
+        return Self.updates(npm, source: .npm) + Self.updates(uv, source: .uv)
+    }
+
+    private static func updates(_ packages: [InstalledPackage], source: CommandLineTools.Source) -> [AppUpdate] {
+        packages.compactMap { package in
+            package.latest.map {
+                AppUpdate(
+                    name: package.name, current: package.version, latest: $0,
+                    source: .commandLine(CommandLineTools.Identifier(source: source, name: package.name))
+                )
+            }
+        }
     }
 
     private func check(_ app: InstalledApp) -> AppUpdate? {

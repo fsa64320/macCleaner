@@ -15,7 +15,7 @@ C'est une réimplémentation indépendante : il ne contient ni code, ni assets, 
 - Désinstallation et restes d'applications.
 - Agents de démarrage et tâches de maintenance.
 - Confidentialité : historique, cookies et sessions des navigateurs, permissions accordées (consultation seule). Mots de passe et favoris ne sont jamais proposés.
-- Mises à jour : détection via Homebrew, flux Sparkle et App Store. Seul Homebrew installe depuis l'app.
+- Mises à jour : détection via Homebrew, npm, uv, flux Sparkle et App Store. Homebrew, npm et uv installent depuis l'app, une par une ou toutes d'un coup.
 - Surveillance : menu bar, alerte de disque faible et analyse planifiée, sans suppression automatique.
 - E-mail et cloud : gros messages Gmail et Outlook, gros fichiers Google Drive, OneDrive et Dropbox, envoyés à la corbeille du service.
 - Images similaires et modèles IA locaux listés un par un.
