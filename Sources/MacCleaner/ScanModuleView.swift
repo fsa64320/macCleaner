@@ -35,6 +35,11 @@ struct ScanModuleView: View {
             }
             .buttonStyle(.plain)
             Text("L'analyse ne modifie rien.").foregroundStyle(.secondary)
+            if module == .privacy {
+                Button("Ouvrir les réglages Confidentialité") {
+                    openSettings("x-apple.systempreferences:com.apple.preference.security?Privacy")
+                }
+            }
             if module == .performance {
                 Button("Ouvrir les réglages Ouverture de session") {
                     openSettings("x-apple.systempreferences:com.apple.LoginItems-Settings.extension")

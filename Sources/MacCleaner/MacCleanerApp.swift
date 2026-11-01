@@ -6,10 +6,21 @@ struct MacCleanerApp: App {
     @StateObject private var model = AppModel()
 
     var body: some Scene {
-        WindowGroup("macCleaner") {
+        WindowGroup("macCleaner", id: "main") {
             RootView().environmentObject(model).frame(minWidth: 960, minHeight: 620)
         }
         .windowStyle(.hiddenTitleBar)
+
+        // SwiftUI réécrit ce binding à chaque rendu : ne publier qu'un vrai changement évite une boucle.
+        MenuBarExtra(isInserted: Binding(
+            get: { model.monitor.showMenuBar },
+            set: { if $0 != model.monitor.showMenuBar { model.monitor.showMenuBar = $0 } }
+        )) {
+            MenuBarContent().environmentObject(model)
+        } label: {
+            Label(formatBytes(model.stats.diskAvailable), systemImage: model.monitorAlert == nil ? "sparkles" : "exclamationmark.triangle.fill")
+                .labelStyle(.titleAndIcon)
+        }
     }
 }
 
@@ -18,10 +29,10 @@ struct RootView: View {
 
     private let sections: [(String, [Module])] = [
         ("", [.dashboard, .smartCare]),
-        ("Nettoyer", [.cleanup, .clutter, .spaceLens]),
-        ("Applications", [.uninstaller, .leftovers]),
+        ("Nettoyer", [.cleanup, .clutter, .spaceLens, .privacy]),
+        ("Applications", [.uninstaller, .leftovers, .updates]),
         ("Système", [.performance, .maintenance]),
-        ("macCleaner", [.history, .exclusions]),
+        ("macCleaner", [.monitoring, .history, .exclusions]),
     ]
 
     var body: some View {
@@ -47,6 +58,8 @@ struct RootView: View {
         case .dashboard: DashboardView()
         case .maintenance: MaintenanceView()
         case .spaceLens: SpaceLensView()
+        case .updates: UpdatesView(store: model.updates)
+        case .monitoring: MonitoringView()
         case .history: HistoryView()
         case .exclusions: ExclusionsView()
         default:

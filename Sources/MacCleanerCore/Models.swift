@@ -16,11 +16,13 @@ public struct ScanItem: Identifiable, Hashable, Sendable {
     public let removal: Removal
     public let launchLabel: String?
     public let locked: Bool
+    /// Fichiers qui partent avec l'élément, comme les blobs d'un modèle Ollama.
+    public let companions: [URL]
 
     public init(
         url: URL, name: String? = nil, detail: String = "", size: Int64,
         selectedByDefault: Bool = false, removal: Removal = .moveToTrash,
-        launchLabel: String? = nil, locked: Bool = false
+        launchLabel: String? = nil, locked: Bool = false, companions: [URL] = []
     ) {
         self.url = url
         self.name = name ?? url.lastPathComponent
@@ -30,6 +32,7 @@ public struct ScanItem: Identifiable, Hashable, Sendable {
         self.removal = removal
         self.launchLabel = launchLabel
         self.locked = locked
+        self.companions = companions
     }
 }
 

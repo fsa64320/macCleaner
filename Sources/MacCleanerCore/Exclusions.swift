@@ -40,7 +40,7 @@ public struct Exclusions: Codable, Equatable, Sendable {
         let categories = result.categories.map { category in
             ScanCategory(
                 id: category.id, title: category.title, summary: category.summary,
-                items: category.items.filter { !covers($0.url) }
+                items: category.items.filter { item in !([item.url] + item.companions).contains(where: covers) }
             )
         }
         return ScanResult(categories: categories, inaccessible: result.inaccessible)

@@ -78,11 +78,12 @@ public struct CleanupRunner: Sendable {
                 break
             }
             ScanProgress.current?.update(item.name, fraction: Double(index) / Double(items.count))
-            guard !item.locked, !exclusions.covers(item.url) else { report.skipped.append(item); continue }
+            guard !item.locked, !([item.url] + item.companions).contains(where: exclusions.covers) else { report.skipped.append(item); continue }
             // Un parent déjà retiré emporte ses enfants sélectionnés.
             guard FileSystem.entryExists(item.url) else { report.skipped.append(item); continue }
             do {
                 try policy.validate(item.url, removal: item.removal)
+                try item.companions.forEach { try policy.validate($0, removal: item.removal) }
                 switch item.removal {
                 case .moveToTrash:
                     try remover.moveToTrash(item.url)
@@ -92,6 +93,7 @@ public struct CleanupRunner: Sendable {
                     if let label = item.launchLabel { try remover.unloadLaunchAgent(label: label) }
                     try remover.moveToTrash(item.url)
                 }
+                try item.companions.filter(FileSystem.entryExists).forEach { try remover.moveToTrash($0) }
                 report.removed.append(item)
             } catch {
                 report.failures.append(CleanupFailure(item: item, reason: error.localizedDescription))

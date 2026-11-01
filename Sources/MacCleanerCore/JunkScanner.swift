@@ -112,16 +112,7 @@ public struct JunkScanner: Sendable {
     }
 
     private func localModels(_ collector: inout Collector) -> ScanCategory {
-        let stores = [
-            (".ollama/models", "Modèles Ollama"), (".lmstudio/models", "Modèles LM Studio"),
-            (".cache/lm-studio/models", "Modèles LM Studio"), (".cache/huggingface/hub", "Cache Hugging Face"),
-        ]
-        let items = stores.compactMap { path, name -> ScanItem? in
-            let url = env.home.appendingPathComponent(path)
-            guard FileSystem.entryExists(url) else { return nil }
-            return ScanItem(url: url, name: name, detail: "À retélécharger si vous en avez besoin", size: FileSystem.allocatedSize(of: url))
-        }
-        return ScanCategory(id: "local-models", title: "Modèles IA locaux", summary: "Volumineux, mais retirer un modèle peut casser vos projets.", items: items.filter { $0.size > 0 })
+        LocalModelScanner(env: env).category(&collector)
     }
 
     private func mailAttachments(_ collector: inout Collector) -> ScanCategory {

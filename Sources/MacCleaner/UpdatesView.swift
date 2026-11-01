@@ -1,0 +1,149 @@
+import AppKit
+import MacCleanerCore
+import SwiftUI
+
+@MainActor
+final class UpdateStore: ObservableObject {
+    @Published var updates: [AppUpdate] = []
+    @Published var scanning = false
+    @Published var scanned = false
+    @Published var activity = ScanProgress.Snapshot()
+    @Published var pending: AppUpdate?
+    @Published var installing: AppUpdate?
+    @Published var messages: [String: String] = [:]
+
+    private var progress: ScanProgress?
+
+    func scan(environment: ScanEnvironment) {
+        let progress = ScanProgress()
+        self.progress = progress
+        scanning = true
+        Task {
+            let polling = Task { [weak self] in
+                while !Task.isCancelled {
+                    self?.activity = progress.snapshot
+                    try? await Task.sleep(for: .milliseconds(150))
+                }
+            }
+            let found = await Task.detached(priority: .userInitiated) {
+                ScanProgress.$current.withValue(progress) { UpdateScanner(environment: environment).scan() }
+            }.value
+            polling.cancel()
+            if !progress.isCancelled {
+                updates = found
+                scanned = true
+            }
+            scanning = false
+        }
+    }
+
+    func cancel() {
+        progress?.cancel()
+    }
+
+    func upgrade(_ update: AppUpdate, token: String, isCask: Bool) {
+        installing = update
+        Task {
+            let outcome = await Task.detached { Result { try Homebrew.upgrade(token: token, isCask: isCask) } }.value
+            switch outcome {
+            case .success:
+                updates.removeAll { $0 == update }
+            case .failure(let error):
+                messages[update.id] = "Échec : \(error.localizedDescription)"
+            }
+            installing = nil
+        }
+    }
+}
+
+struct UpdatesView: View {
+    @EnvironmentObject private var model: AppModel
+    @ObservedObject var store: UpdateStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ModuleHeader(module: .updates)
+            if store.scanning {
+                ActivityView(title: "Recherche de mises à jour…", activity: store.activity, onCancel: store.cancel)
+            } else if store.scanned {
+                results
+            } else {
+                intro
+            }
+        }
+        .confirmationDialog(
+            "Mettre à jour \(store.pending?.name ?? "") ?",
+            isPresented: Binding(get: { store.pending != nil }, set: { if !$0 { store.pending = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Mettre à jour") {
+                if let update = store.pending, case .homebrew(let token, let isCask) = update.source {
+                    store.upgrade(update, token: token, isCask: isCask)
+                }
+            }
+            Button("Annuler", role: .cancel) {}
+        } message: {
+            Text("Homebrew installera la version \(store.pending?.latest ?? "").")
+        }
+    }
+
+    private var intro: some View {
+        VStack(spacing: 18) {
+            Spacer()
+            Button { store.scan(environment: model.environment) } label: {
+                Text("Rechercher").font(.title2.bold()).frame(width: 150, height: 150)
+                    .background(Module.updates.tint.gradient, in: Circle()).foregroundStyle(.white)
+            }
+            .buttonStyle(.plain)
+            Text("Interroge les serveurs de mise à jour de vos apps et l'App Store.")
+                .foregroundStyle(.secondary).multilineTextAlignment(.center)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var results: some View {
+        VStack(spacing: 0) {
+            if store.updates.isEmpty {
+                ContentUnavailableView("Tout est à jour", systemImage: "checkmark.seal", description: Text("Aucune mise à jour détectée."))
+            } else {
+                List(store.updates) { update in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(update.name).font(.headline)
+                            Text("\(update.current) → \(update.latest) · \(update.sourceName)").font(.caption).foregroundStyle(.secondary)
+                            if let message = store.messages[update.id] {
+                                Text(message).font(.caption).foregroundStyle(.red).lineLimit(2)
+                            }
+                        }
+                        Spacer()
+                        action(for: update)
+                    }
+                    .padding(.vertical, 3)
+                }
+                .scrollContentBackground(.hidden)
+            }
+            HStack {
+                Button("Nouvelle recherche") { store.scan(environment: model.environment) }
+                Spacer()
+                Text("\(store.updates.count) mise(s) à jour").monospacedDigit()
+            }
+            .padding(14).background(.bar)
+        }
+    }
+
+    @ViewBuilder private func action(for update: AppUpdate) -> some View {
+        if store.installing == update {
+            ProgressView().controlSize(.small)
+        } else {
+            switch update.source {
+            case .homebrew:
+                Button("Mettre à jour…") { store.pending = update }.disabled(store.installing != nil)
+            case .sparkle(let app):
+                Button("Ouvrir l'app") { NSWorkspace.shared.open(app) }
+            case .appStore(let page):
+                Button("App Store") { NSWorkspace.shared.open(page) }
+            }
+        }
+    }
+}

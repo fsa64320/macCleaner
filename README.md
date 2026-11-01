@@ -12,6 +12,10 @@ C'est une réimplémentation indépendante : il ne contient ni code, ni assets, 
 - Carte du disque : treemap navigable.
 - Désinstallation et restes d'applications.
 - Agents de démarrage et tâches de maintenance.
+- Confidentialité : historique, cookies et sessions des navigateurs, permissions accordées (consultation seule). Mots de passe et favoris ne sont jamais proposés.
+- Mises à jour : détection via Homebrew, flux Sparkle et App Store. Seul Homebrew installe depuis l'app.
+- Surveillance : menu bar, alerte de disque faible et analyse planifiée, sans suppression automatique.
+- Images similaires et modèles IA locaux listés un par un.
 - Exclusions : chemins à ne jamais proposer ni retirer.
 - Historique des nettoyages.
 

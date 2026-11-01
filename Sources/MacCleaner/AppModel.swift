@@ -1,9 +1,11 @@
 import AppKit
 import MacCleanerCore
+import ServiceManagement
 import SwiftUI
+import UserNotifications
 
 enum Module: String, CaseIterable, Identifiable {
-    case dashboard, smartCare, cleanup, performance, maintenance, uninstaller, leftovers, clutter, spaceLens, history, exclusions
+    case dashboard, smartCare, cleanup, performance, maintenance, uninstaller, leftovers, clutter, spaceLens, privacy, updates, monitoring, history, exclusions
 
     var id: String { rawValue }
 
@@ -18,6 +20,9 @@ enum Module: String, CaseIterable, Identifiable {
         case .leftovers: "Restes d'apps"
         case .clutter: "Encombrement"
         case .spaceLens: "Carte du disque"
+        case .privacy: "Confidentialité"
+        case .updates: "Mises à jour"
+        case .monitoring: "Surveillance"
         case .history: "Historique"
         case .exclusions: "Exclusions"
         }
@@ -34,6 +39,9 @@ enum Module: String, CaseIterable, Identifiable {
         case .leftovers: "Fichiers d'apps disparues et installateurs oubliés."
         case .clutter: "Gros fichiers, doublons et vieux téléchargements."
         case .spaceLens: "Voyez ce qui occupe réellement la place."
+        case .privacy: "Traces des navigateurs et permissions accordées aux apps."
+        case .updates: "Homebrew, mises à jour intégrées et App Store."
+        case .monitoring: "Alertes et menu bar. La surveillance ne supprime jamais rien."
         case .history: "Ce qui a été retiré, et quand."
         case .exclusions: "Ce que macCleaner ne doit jamais proposer ni retirer."
         }
@@ -50,6 +58,9 @@ enum Module: String, CaseIterable, Identifiable {
         case .leftovers: "shippingbox"
         case .clutter: "doc.on.doc"
         case .spaceLens: "square.grid.3x3.square"
+        case .privacy: "eye.slash"
+        case .updates: "arrow.down.app"
+        case .monitoring: "bell.badge"
         case .history: "clock.arrow.circlepath"
         case .exclusions: "hand.raised"
         }
@@ -66,6 +77,9 @@ enum Module: String, CaseIterable, Identifiable {
         case .leftovers: .cyan
         case .clutter: .purple
         case .spaceLens: .pink
+        case .privacy: .mint
+        case .updates: .blue
+        case .monitoring: .yellow
         case .history: .gray
         case .exclusions: .red
         }
@@ -174,16 +188,87 @@ final class AppModel: ObservableObject {
     /// Tant qu'elle est renseignée, aucune suppression n'est permise : les exclusions sont inconnues.
     @Published private(set) var exclusionsLoadError: String?
     @Published private(set) var exclusionsSaveError: String?
+    @Published var monitor: MonitorSettings {
+        didSet { try? monitor.save(to: monitorURL) }
+    }
+    @Published private(set) var monitorAlert: String?
+    @Published private(set) var launchAtLogin = SMAppService.mainApp.status == .enabled
+    @Published private(set) var launchAtLoginError: String?
 
     let environment = ScanEnvironment()
+    let updates = UpdateStore()
     private(set) lazy var stores: [Module: ScanStore] = makeStores()
 
     private var support: URL { environment.library.appendingPathComponent("Application Support/macCleaner") }
     private var exclusionsURL: URL { support.appendingPathComponent("exclusions.json") }
     var history: CleanupHistory { CleanupHistory(fileURL: support.appendingPathComponent("history.jsonl")) }
 
+    private static var supportFolder: URL {
+        ScanEnvironment().library.appendingPathComponent("Application Support/macCleaner")
+    }
+    private var monitorURL: URL { support.appendingPathComponent("monitor.json") }
+
     init() {
+        monitor = MonitorSettings.load(from: Self.supportFolder.appendingPathComponent("monitor.json"))
         loadExclusions()
+        Task { await watch() }
+    }
+
+    private func watch() async {
+        while !Task.isCancelled {
+            refreshStats()
+            await evaluateMonitoring()
+            try? await Task.sleep(for: .seconds(60))
+        }
+    }
+
+    private func evaluateMonitoring() async {
+        let now = Date()
+        if MonitorPolicy.isDiskLow(monitor, available: stats.diskAvailable) {
+            let message = "Espace disque faible : \(formatBytes(stats.diskAvailable)) disponibles."
+            monitorAlert = message
+            if MonitorPolicy.shouldAlertDisk(monitor, available: stats.diskAvailable, now: now) {
+                monitor.lastDiskAlert = now
+                notify(message)
+            }
+        } else if monitorAlert?.hasPrefix("Espace") == true {
+            monitorAlert = nil
+        }
+        guard MonitorPolicy.shouldScan(monitor, now: now) else { return }
+        monitor.lastScan = now
+        let environment = environment
+        let exclusions = exclusions
+        let result = await Task.detached(priority: .background) {
+            exclusions.applied(to: JunkScanner(environment: environment).scanEssentials())
+        }.value
+        if let size = MonitorPolicy.junkWorthReporting(monitor, result: result) {
+            let message = "\(formatBytes(size)) de caches et journaux à nettoyer."
+            monitorAlert = message
+            notify(message)
+        }
+    }
+
+    func requestNotifications() {
+        guard Bundle.main.bundleIdentifier != nil else { return }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert]) { _, _ in }
+    }
+
+    private func notify(_ message: String) {
+        guard Bundle.main.bundleIdentifier != nil else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "macCleaner"
+        content.body = message
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+    }
+
+    func setLaunchAtLogin(_ enabled: Bool) {
+        do {
+            if enabled { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+            launchAtLoginError = nil
+        } catch {
+            launchAtLoginError = error.localizedDescription
+        }
+        launchAtLogin = SMAppService.mainApp.status == .enabled
     }
 
     func loadExclusions() {
@@ -229,16 +314,22 @@ final class AppModel: ObservableObject {
 
     private func makeStores() -> [Module: ScanStore] {
         let environment = environment
-        let apps = ApplicationScanner(environment: environment) { bundleID in
+        let isRunning: @Sendable (String) -> Bool = { bundleID in
             !NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).isEmpty
         }
+        let apps = ApplicationScanner(environment: environment, isRunning: isRunning)
         return [
             .smartCare: ScanStore(module: .smartCare, model: self) { JunkScanner(environment: environment).scanEssentials() },
             .cleanup: ScanStore(module: .cleanup, model: self) { JunkScanner(environment: environment).scan() },
             .performance: ScanStore(module: .performance, model: self) { PerformanceScanner(environment: environment).scan() },
             .uninstaller: ScanStore(module: .uninstaller, model: self) { apps.scanUninstaller() },
             .leftovers: ScanStore(module: .leftovers, model: self) { apps.scanLeftovers() },
-            .clutter: ScanStore(module: .clutter, model: self) { ClutterScanner(environment: environment).scan() },
+            .clutter: ScanStore(module: .clutter, model: self) {
+                .merged([ClutterScanner(environment: environment).scan(), SimilarImageScanner(environment: environment).scan()])
+            },
+            .privacy: ScanStore(module: .privacy, model: self) {
+                PrivacyScanner(environment: environment, isRunning: isRunning).scan()
+            },
         ]
     }
 

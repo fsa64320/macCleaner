@@ -4,6 +4,9 @@ public struct InstalledApp: Sendable, Hashable {
     public let url: URL
     public let name: String
     public let bundleID: String
+    public let version: String
+    public let buildVersion: String
+    public let feedURL: URL?
 }
 
 public struct ApplicationScanner: Sendable {
@@ -121,6 +124,11 @@ public struct ApplicationScanner: Sendable {
               let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
               let bundleID = plist["CFBundleIdentifier"] as? String else { return nil }
         let name = (plist["CFBundleDisplayName"] as? String) ?? (plist["CFBundleName"] as? String) ?? url.deletingPathExtension().lastPathComponent
-        return InstalledApp(url: url, name: name, bundleID: bundleID)
+        let build = (plist["CFBundleVersion"] as? String) ?? ""
+        return InstalledApp(
+            url: url, name: name, bundleID: bundleID,
+            version: (plist["CFBundleShortVersionString"] as? String) ?? build, buildVersion: build,
+            feedURL: (plist["SUFeedURL"] as? String).flatMap(URL.init(string:))
+        )
     }
 }
