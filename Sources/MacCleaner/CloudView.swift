@@ -46,7 +46,7 @@ final class CloudStore: ObservableObject {
     init(history: CleanupHistory) {
         self.history = history
         credentials = CloudCredentials.load(from: Bundle.main.url(forResource: "OAuthClients", withExtension: "json"))
-        connected = Set(RemoteProvider.allCases.filter { tokens.tokens(for: $0) != nil })
+        connected = Set(RemoteProvider.allCases.filter(tokens.hasTokens))
     }
 
     var selectedItems: [RemoteItem] { items.filter { selection.contains($0.id) } }

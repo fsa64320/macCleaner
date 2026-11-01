@@ -28,6 +28,7 @@ final class MemoryTokenStore: TokenStoring, @unchecked Sendable {
     private var values: [RemoteProvider: OAuthTokens] = [:]
 
     func tokens(for provider: RemoteProvider) -> OAuthTokens? { lock.withLock { values[provider] } }
+    func hasTokens(for provider: RemoteProvider) -> Bool { tokens(for: provider) != nil }
     func save(_ tokens: OAuthTokens, for provider: RemoteProvider) throws { lock.withLock { values[provider] = tokens } }
     func delete(for provider: RemoteProvider) { lock.withLock { values[provider] = nil } }
 }

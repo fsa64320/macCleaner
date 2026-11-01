@@ -58,6 +58,7 @@ struct RealSystemTests {
         try keychain.write(Data("v1".utf8), account: "account")
         try keychain.write(Data("v2".utf8), account: "account")
         #expect(keychain.read("account") == Data("v2".utf8))
+        #expect(keychain.contains("account"))
         keychain.delete("account")
         #expect(keychain.read("account") == nil)
     }

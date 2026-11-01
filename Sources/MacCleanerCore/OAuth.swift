@@ -114,6 +114,7 @@ public struct OAuthTokens: Codable, Equatable, Sendable {
 
 public protocol TokenStoring: Sendable {
     func tokens(for provider: RemoteProvider) -> OAuthTokens?
+    func hasTokens(for provider: RemoteProvider) -> Bool
     func save(_ tokens: OAuthTokens, for provider: RemoteProvider) throws
     func delete(for provider: RemoteProvider)
 }
@@ -128,6 +129,14 @@ public struct Keychain: Sendable {
 
     private func query(_ account: String) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account]
+    }
+
+    /// Lit seulement les attributs : contrairement à `read`, ne déclenche aucune demande de mot de passe.
+    public func contains(_ account: String) -> Bool {
+        var request = query(account)
+        request[kSecReturnAttributes as String] = true
+        request[kSecMatchLimit as String] = kSecMatchLimitOne
+        return SecItemCopyMatching(request as CFDictionary, nil) == errSecSuccess
     }
 
     public func read(_ account: String) -> Data? {
@@ -164,6 +173,10 @@ public struct KeychainTokenStore: TokenStoring {
 
     public func tokens(for provider: RemoteProvider) -> OAuthTokens? {
         keychain.read(provider.rawValue).flatMap { try? JSONDecoder().decode(OAuthTokens.self, from: $0) }
+    }
+
+    public func hasTokens(for provider: RemoteProvider) -> Bool {
+        keychain.contains(provider.rawValue)
     }
 
     public func save(_ tokens: OAuthTokens, for provider: RemoteProvider) throws {
