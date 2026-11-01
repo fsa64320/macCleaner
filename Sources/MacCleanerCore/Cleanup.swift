@@ -4,6 +4,7 @@ public protocol FileRemoving: Sendable {
     @discardableResult func moveToTrash(_ url: URL) throws -> URL?
     func deletePermanently(_ url: URL) throws
     func unloadLaunchAgent(label: String) throws
+    func evictLocalCopy(_ url: URL) throws
 }
 
 public struct SystemFileRemover: FileRemoving {
@@ -17,6 +18,10 @@ public struct SystemFileRemover: FileRemoving {
 
     public func deletePermanently(_ url: URL) throws {
         try FileManager.default.removeItem(at: url)
+    }
+
+    public func evictLocalCopy(_ url: URL) throws {
+        try FileManager.default.evictUbiquitousItem(at: url)
     }
 
     public func unloadLaunchAgent(label: String) throws {
@@ -45,7 +50,8 @@ public struct CleanupReport: Sendable {
 
     public init() {}
 
-    public var trashedSize: Int64 { removed.filter { $0.removal != .permanent }.reduce(0) { $0 + $1.size } }
+    public var trashedSize: Int64 { removed.filter { $0.removal != .permanent && $0.removal != .evictLocalCopy }.reduce(0) { $0 + $1.size } }
+    public var evictedSize: Int64 { removed.filter { $0.removal == .evictLocalCopy }.reduce(0) { $0 + $1.size } }
     public var permanentSize: Int64 { removed.filter { $0.removal == .permanent }.reduce(0) { $0 + $1.size } }
 }
 
@@ -89,6 +95,8 @@ public struct CleanupRunner: Sendable {
                     try remover.moveToTrash(item.url)
                 case .permanent:
                     try remover.deletePermanently(item.url)
+                case .evictLocalCopy:
+                    try remover.evictLocalCopy(item.url)
                 case .launchAgent:
                     if let label = item.launchLabel { try remover.unloadLaunchAgent(label: label) }
                     try remover.moveToTrash(item.url)
@@ -109,6 +117,7 @@ public struct CleanupRunner: Sendable {
         try? history.append(HistoryEntry(
             date: Date(), module: module, removedCount: report.removed.count,
             trashedBytes: report.trashedSize, permanentBytes: report.permanentSize,
+            evictedBytes: report.evictedSize,
             failureCount: report.failures.count, cancelledCount: report.cancelledCount,
             paths: report.removed.map(\.url.path)
         ))

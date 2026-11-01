@@ -7,6 +7,7 @@ public struct HistoryEntry: Codable, Identifiable, Sendable {
     public let removedCount: Int
     public let trashedBytes: Int64
     public let permanentBytes: Int64
+    public var evictedBytes: Int64?
     public let failureCount: Int
     public let cancelledCount: Int
     public let paths: [String]
@@ -26,6 +27,14 @@ public struct CleanupHistory: Sendable {
         var data = try encoder.encode(entry)
         data.append(0x0A)
         try FileSystem.append(data, to: fileURL)
+    }
+
+    public func recordRemote(module: String, count: Int, bytes: Int64, failures: Int) throws {
+        guard count > 0 || failures > 0 else { return }
+        try append(HistoryEntry(
+            date: Date(), module: module, removedCount: count, trashedBytes: bytes,
+            permanentBytes: 0, evictedBytes: nil, failureCount: failures, cancelledCount: 0, paths: []
+        ))
     }
 
     /// Du plus récent au plus ancien.

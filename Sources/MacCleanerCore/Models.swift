@@ -4,6 +4,8 @@ public enum Removal: String, Sendable {
     case moveToTrash
     case permanent
     case launchAgent
+    /// Retire la copie locale ; le fichier reste dans le cloud.
+    case evictLocalCopy
 }
 
 public struct ScanItem: Identifiable, Hashable, Sendable {

@@ -39,7 +39,7 @@ struct HistoryView: View {
     }
 
     private func summary(_ entry: HistoryEntry) -> String {
-        var parts = ["\(entry.removedCount) élément(s)", formatBytes(entry.trashedBytes + entry.permanentBytes)]
+        var parts = ["\(entry.removedCount) élément(s)", formatBytes(entry.trashedBytes + entry.permanentBytes + (entry.evictedBytes ?? 0))]
         if entry.failureCount > 0 { parts.append("\(entry.failureCount) échec(s)") }
         if entry.cancelledCount > 0 { parts.append("interrompu") }
         return parts.joined(separator: " · ")

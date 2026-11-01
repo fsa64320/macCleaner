@@ -52,6 +52,16 @@ struct RealSystemTests {
         #expect(delay < .seconds(2), "\(delay)")
     }
 
+    @Test func testKeychainRoundTrip() throws {
+        let keychain = Keychain(service: "local.maccleaner.test.\(UUID().uuidString)")
+        defer { keychain.delete("account") }
+        try keychain.write(Data("v1".utf8), account: "account")
+        try keychain.write(Data("v2".utf8), account: "account")
+        #expect(keychain.read("account") == Data("v2".utf8))
+        keychain.delete("account")
+        #expect(keychain.read("account") == nil)
+    }
+
     private func launchctl(_ arguments: [String]) -> Int32 {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/launchctl")

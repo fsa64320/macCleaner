@@ -4,12 +4,14 @@ public enum SafetyError: LocalizedError, Equatable {
     case outsideAllowedRoots(String)
     case protectedPath(String)
     case permanentOutsideTrash(String)
+    case notCloudFile(String)
 
     public var errorDescription: String? {
         switch self {
         case .outsideAllowedRoots(let path): "Chemin hors des zones autorisées : \(path)"
         case .protectedPath(let path): "Chemin protégé : \(path)"
         case .permanentOutsideTrash(let path): "Suppression définitive refusée hors corbeille : \(path)"
+        case .notCloudFile(let path): "Ce fichier n'est pas synchronisé : \(path)"
         }
     }
 }
@@ -40,6 +42,11 @@ public struct SafetyPolicy: Sendable {
     public func validate(_ url: URL, removal: Removal) throws {
         let path = Self.resolved(url.deletingLastPathComponent()) + "/" + url.lastPathComponent
         if url.path.split(separator: "/").contains("..") { throw SafetyError.protectedPath(url.path) }
+        if removal == .evictLocalCopy {
+            let isCloud = ["\(home)/Library/CloudStorage/", "\(home)/Library/Mobile Documents/"].contains { path.hasPrefix($0) }
+            guard isCloud else { throw SafetyError.notCloudFile(path) }
+            return
+        }
         if protectedExact.contains(path) || applicationRoots.contains(path) { throw SafetyError.protectedPath(path) }
         if protectedTrees.contains(where: { path == $0 || path.hasPrefix($0 + "/") }) {
             throw SafetyError.protectedPath(path)

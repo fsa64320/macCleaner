@@ -17,6 +17,8 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
     var deleted: [URL] = []
     var unloaded: [String] = []
     func moveToTrash(_ url: URL) throws -> URL? { trashed.append(url); return nil }
+    var evicted: [URL] = []
+    func evictLocalCopy(_ url: URL) throws { evicted.append(url) }
     func deletePermanently(_ url: URL) throws { deleted.append(url) }
     func unloadLaunchAgent(label: String) throws { unloaded.append(label) }
 }
@@ -154,7 +156,7 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
     @Test func testHistorySurvivesCorruptLine() throws {
         let url = home.appendingPathComponent("history.jsonl")
         let history = CleanupHistory(fileURL: url)
-        let entry = HistoryEntry(date: Date(), module: "A", removedCount: 1, trashedBytes: 1, permanentBytes: 0, failureCount: 0, cancelledCount: 0, paths: [])
+        let entry = HistoryEntry(date: Date(), module: "A", removedCount: 1, trashedBytes: 1, permanentBytes: 0, evictedBytes: nil, failureCount: 0, cancelledCount: 0, paths: [])
         try history.append(entry)
         try FileSystem.append(Data("pas du json\n".utf8), to: url)
         try history.append(entry)
@@ -438,6 +440,40 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
         let url = home.appendingPathComponent("monitor.json")
         try Data("{".utf8).write(to: url)
         #expect(MonitorSettings.load(from: url) == MonitorSettings())
+    }
+
+    // MARK: Cloud sur ce Mac
+
+    @Test func testCloudLocalListsOnlyDownloadedLargeFiles() throws {
+        let kept = try write("Library/CloudStorage/GoogleDrive-moi@exemple.fr/Mon Drive/gros.mov", bytes: 300_000)
+        try write("Library/CloudStorage/GoogleDrive-moi@exemple.fr/Mon Drive/enligne.mov", bytes: 300_000)
+        try write("Library/CloudStorage/GoogleDrive-moi@exemple.fr/petit.txt", bytes: 8192)
+        try write("Library/Mobile Documents/com~apple~CloudDocs/video.mp4", bytes: 300_000)
+        let scanner = CloudLocalScanner(environment: env, minimumSize: 100_000) { $0.lastPathComponent != "enligne.mov" }
+        let result = scanner.scan()
+        #expect(Set(result.categories.map(\.title)) == ["Google Drive · moi@exemple.fr", "iCloud Drive"])
+        let items = result.categories.flatMap(\.items)
+        #expect(items.count == 2)
+        #expect(items.allSatisfy { $0.removal == .evictLocalCopy && !$0.selectedByDefault })
+        #expect(items.contains { $0.url.lastPathComponent == kept.lastPathComponent })
+    }
+
+    @Test func testEvictionAllowedOnlyForCloudFiles() throws {
+        let policy = SafetyPolicy(environment: env)
+        let cloud = try write("Library/CloudStorage/Dropbox/a.bin")
+        #expect(throws: Never.self) { try policy.validate(cloud, removal: .evictLocalCopy) }
+        #expect(throws: (any Error).self) { try policy.validate(cloud, removal: .moveToTrash) }
+        #expect(throws: (any Error).self) { try policy.validate(home.appendingPathComponent("Documents/a"), removal: .evictLocalCopy) }
+    }
+
+    @Test func testRunnerEvictsWithoutTrashing() throws {
+        let cloud = try write("Library/Mobile Documents/x/a.bin")
+        let remover = RecordingRemover()
+        let report = CleanupRunner(remover: remover, environment: env).run([ScanItem(url: cloud, size: 9, removal: .evictLocalCopy)])
+        #expect(remover.evicted == [cloud])
+        #expect(remover.trashed.isEmpty)
+        #expect(report.evictedSize == 9)
+        #expect(report.trashedSize == 0)
     }
 
     // MARK: Scanners

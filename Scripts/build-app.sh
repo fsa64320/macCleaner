@@ -23,6 +23,9 @@ cat > "$app/Contents/Info.plist" <<'P'
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 P
+if [[ -f Config/OAuthClients.json ]]; then
+  cp Config/OAuthClients.json "$app/Contents/Resources/OAuthClients.json"
+fi
 # SIGN_IDENTITY : « Developer ID Application: … ». Sans lui, signature locale seulement.
 # NOTARY_PROFILE : profil créé avec `xcrun notarytool store-credentials`.
 if [[ -n "${SIGN_IDENTITY:-}" ]]; then

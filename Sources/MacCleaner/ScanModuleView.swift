@@ -5,11 +5,12 @@ import SwiftUI
 struct ScanModuleView: View {
     let module: Module
     @ObservedObject var store: ScanStore
+    var showsHeader = true
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ModuleHeader(module: module)
+            if showsHeader { ModuleHeader(module: module) }
             switch store.phase {
             case .idle: intro
             case .scanning: ActivityView(title: "Analyse en cours…", activity: store.activity, onCancel: store.cancel)
@@ -91,6 +92,9 @@ struct ScanModuleView: View {
     private var finished: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("\(store.report.removed.count) élément(s) retiré(s)").font(.largeTitle.bold())
+            if store.report.evictedSize > 0 {
+                Text("\(formatBytes(store.report.evictedSize)) libérés sur ce Mac, les fichiers restent dans le cloud.").foregroundStyle(.secondary)
+            }
             if store.report.trashedSize > 0 {
                 Text("\(formatBytes(store.report.trashedSize)) dans la Corbeille : récupérable, l'espace revient une fois celle-ci vidée.")
                     .foregroundStyle(.secondary)
@@ -123,6 +127,8 @@ struct ScanModuleView: View {
 
     private var confirmMessage: String {
         let permanent = store.selectedItems.filter { $0.removal == .permanent }.count
+        let evicting = store.selectedItems.allSatisfy { $0.removal == .evictLocalCopy }
+        if evicting { return "\(formatBytes(store.selectedSize)) d'espace libéré sur ce Mac. Les fichiers restent dans le cloud." }
         let base = "\(formatBytes(store.selectedSize)) seront envoyés à la Corbeille."
         return permanent > 0 ? "\(base) ATTENTION : \(permanent) élément(s) des corbeilles seront supprimés définitivement." : base
     }

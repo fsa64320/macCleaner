@@ -5,7 +5,7 @@ import SwiftUI
 import UserNotifications
 
 enum Module: String, CaseIterable, Identifiable {
-    case dashboard, smartCare, cleanup, performance, maintenance, uninstaller, leftovers, clutter, spaceLens, privacy, updates, monitoring, history, exclusions
+    case dashboard, smartCare, cleanup, performance, maintenance, uninstaller, leftovers, clutter, spaceLens, privacy, cloud, updates, monitoring, history, exclusions
 
     var id: String { rawValue }
 
@@ -21,6 +21,7 @@ enum Module: String, CaseIterable, Identifiable {
         case .clutter: "Encombrement"
         case .spaceLens: "Carte du disque"
         case .privacy: "Confidentialité"
+        case .cloud: "E-mail et cloud"
         case .updates: "Mises à jour"
         case .monitoring: "Surveillance"
         case .history: "Historique"
@@ -40,6 +41,7 @@ enum Module: String, CaseIterable, Identifiable {
         case .clutter: "Gros fichiers, doublons et vieux téléchargements."
         case .spaceLens: "Voyez ce qui occupe réellement la place."
         case .privacy: "Traces des navigateurs et permissions accordées aux apps."
+        case .cloud: "Libérez des copies locales, ou connectez un compte pour le nettoyer."
         case .updates: "Homebrew, mises à jour intégrées et App Store."
         case .monitoring: "Alertes et menu bar. La surveillance ne supprime jamais rien."
         case .history: "Ce qui a été retiré, et quand."
@@ -59,6 +61,7 @@ enum Module: String, CaseIterable, Identifiable {
         case .clutter: "doc.on.doc"
         case .spaceLens: "square.grid.3x3.square"
         case .privacy: "eye.slash"
+        case .cloud: "cloud"
         case .updates: "arrow.down.app"
         case .monitoring: "bell.badge"
         case .history: "clock.arrow.circlepath"
@@ -78,6 +81,7 @@ enum Module: String, CaseIterable, Identifiable {
         case .clutter: .purple
         case .spaceLens: .pink
         case .privacy: .mint
+        case .cloud: .blue
         case .updates: .blue
         case .monitoring: .yellow
         case .history: .gray
@@ -197,6 +201,7 @@ final class AppModel: ObservableObject {
 
     let environment = ScanEnvironment()
     let updates = UpdateStore()
+    private(set) lazy var cloud = CloudStore(history: history)
     private(set) lazy var stores: [Module: ScanStore] = makeStores()
 
     private var support: URL { environment.library.appendingPathComponent("Application Support/macCleaner") }
@@ -327,6 +332,7 @@ final class AppModel: ObservableObject {
             .clutter: ScanStore(module: .clutter, model: self) {
                 .merged([ClutterScanner(environment: environment).scan(), SimilarImageScanner(environment: environment).scan()])
             },
+            .cloud: ScanStore(module: .cloud, model: self) { CloudLocalScanner(environment: environment).scan() },
             .privacy: ScanStore(module: .privacy, model: self) {
                 PrivacyScanner(environment: environment, isRunning: isRunning).scan()
             },
