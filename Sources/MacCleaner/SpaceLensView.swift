@@ -22,7 +22,7 @@ struct SpaceLensView: View {
             }
             .padding(.horizontal, 24).padding(.bottom, 12)
             if state.scanning {
-                ProgressView("Lecture du disque…").frame(maxWidth: .infinity, maxHeight: .infinity)
+                ActivityView(title: "Lecture du disque…", activity: state.activity, onCancel: state.cancel)
             } else if let current = state.current {
                 TreemapView(
                     node: current,
@@ -39,7 +39,7 @@ struct SpaceLensView: View {
             isPresented: Binding(get: { state.pendingRemoval != nil }, set: { if !$0 { state.pendingRemoval = nil } }), titleVisibility: .visible
         ) {
             Button("Envoyer à la Corbeille", role: .destructive) {
-                if let node = state.pendingRemoval { state.remove(node, environment: model.environment) }
+                if let node = state.pendingRemoval { state.remove(node, runner: model.makeRunner(module: .spaceLens)) }
             }
             Button("Annuler", role: .cancel) {}
         } message: {
@@ -67,24 +67,49 @@ private final class SpaceLensState: ObservableObject {
     @Published var scanning = false
     @Published var pendingRemoval: SpaceNode?
     @Published var errorMessage: String?
+    @Published var activity = ScanProgress.Snapshot()
+
+    private var progress: ScanProgress?
 
     var current: SpaceNode? { path.last ?? root }
 
     func scan(_ url: URL) {
         scanning = true
         path = []
+        let progress = ScanProgress()
+        self.progress = progress
         Task {
-            root = await Task.detached(priority: .userInitiated) { SpaceScanner().scan(url) }.value
+            let polling = Task { [weak self] in
+                while !Task.isCancelled {
+                    self?.activity = progress.snapshot
+                    try? await Task.sleep(for: .milliseconds(150))
+                }
+            }
+            let node = await Task.detached(priority: .userInitiated) {
+                ScanProgress.$current.withValue(progress) { SpaceScanner().scan(url) }
+            }.value
+            polling.cancel()
+            if !progress.isCancelled { root = node }
             scanning = false
         }
     }
 
-    func remove(_ node: SpaceNode, environment: ScanEnvironment) {
+    func cancel() {
+        progress?.cancel()
+    }
+
+    func remove(_ node: SpaceNode, runner: CleanupRunner?) {
+        guard let runner else {
+            errorMessage = "Le fichier des exclusions est illisible."
+            return
+        }
         let item = ScanItem(url: node.url, size: node.size)
         Task {
-            let report = await Task.detached { CleanupRunner(environment: environment).run([item]) }.value
+            let report = await Task.detached { runner.run([item]) }.value
             if let failure = report.failures.first {
                 errorMessage = failure.reason
+            } else if report.removed.isEmpty {
+                errorMessage = "Cet élément est protégé par une exclusion."
             } else if let rootURL = root?.url {
                 scan(rootURL)
             }

@@ -3,7 +3,7 @@ import MacCleanerCore
 import SwiftUI
 
 enum Module: String, CaseIterable, Identifiable {
-    case dashboard, smartCare, cleanup, performance, maintenance, uninstaller, leftovers, clutter, spaceLens
+    case dashboard, smartCare, cleanup, performance, maintenance, uninstaller, leftovers, clutter, spaceLens, history, exclusions
 
     var id: String { rawValue }
 
@@ -18,6 +18,8 @@ enum Module: String, CaseIterable, Identifiable {
         case .leftovers: "Restes d'apps"
         case .clutter: "Encombrement"
         case .spaceLens: "Carte du disque"
+        case .history: "Historique"
+        case .exclusions: "Exclusions"
         }
     }
 
@@ -32,6 +34,8 @@ enum Module: String, CaseIterable, Identifiable {
         case .leftovers: "Fichiers d'apps disparues et installateurs oubliés."
         case .clutter: "Gros fichiers, doublons et vieux téléchargements."
         case .spaceLens: "Voyez ce qui occupe réellement la place."
+        case .history: "Ce qui a été retiré, et quand."
+        case .exclusions: "Ce que macCleaner ne doit jamais proposer ni retirer."
         }
     }
 
@@ -46,6 +50,8 @@ enum Module: String, CaseIterable, Identifiable {
         case .leftovers: "shippingbox"
         case .clutter: "doc.on.doc"
         case .spaceLens: "square.grid.3x3.square"
+        case .history: "clock.arrow.circlepath"
+        case .exclusions: "hand.raised"
         }
     }
 
@@ -60,6 +66,8 @@ enum Module: String, CaseIterable, Identifiable {
         case .leftovers: .cyan
         case .clutter: .purple
         case .spaceLens: .pink
+        case .history: .gray
+        case .exclusions: .red
         }
     }
 }
@@ -75,12 +83,16 @@ final class ScanStore: ObservableObject {
     @Published var selection: Set<String> = []
     @Published var report = CleanupReport()
     @Published var confirming = false
+    @Published var activity = ScanProgress.Snapshot()
 
-    private let environment: ScanEnvironment
+    private let module: Module
+    private unowned let model: AppModel
     private let scanner: @Sendable () -> ScanResult
+    private var progress: ScanProgress?
 
-    init(environment: ScanEnvironment, scanner: @escaping @Sendable () -> ScanResult) {
-        self.environment = environment
+    init(module: Module, model: AppModel, scanner: @escaping @Sendable () -> ScanResult) {
+        self.module = module
+        self.model = model
         self.scanner = scanner
     }
 
@@ -92,24 +104,35 @@ final class ScanStore: ObservableObject {
         phase = .scanning
         let scanner = scanner
         Task {
-            let result = await Task.detached(priority: .userInitiated) { scanner() }.value
-            self.result = result
-            selection = Set(result.categories.flatMap(\.items).filter { $0.selectedByDefault && !$0.locked }.map(\.id))
+            let (result, cancelled) = await track { scanner() }
+            guard !cancelled else {
+                phase = .idle
+                return
+            }
+            self.result = model.exclusions.applied(to: result)
+            selection = Set(allItems.filter { $0.selectedByDefault && !$0.locked }.map(\.id))
             phase = .results
         }
     }
 
     func clean() {
+        guard let runner = model.makeRunner(module: module) else { return }
         let items = selectedItems
-        let environment = environment
         phase = .cleaning
         Task {
-            report = await Task.detached(priority: .userInitiated) {
-                let log = environment.library.appendingPathComponent("Logs/macCleaner/cleanup.log")
-                return CleanupRunner(environment: environment, logURL: log).run(items)
-            }.value
+            report = await track { runner.run(items) }.0
             phase = .finished
         }
+    }
+
+    func cancel() {
+        progress?.cancel()
+    }
+
+    func exclude(_ item: ScanItem) {
+        model.addExclusion(item.url)
+        result = model.exclusions.applied(to: result)
+        selection.formIntersection(allItems.map(\.id))
     }
 
     func toggle(_ item: ScanItem) {
@@ -123,15 +146,86 @@ final class ScanStore: ObservableObject {
     }
 
     func reset() { phase = .idle }
+
+    private func track<Value: Sendable>(_ work: @escaping @Sendable () -> Value) async -> (Value, Bool) {
+        let progress = ScanProgress()
+        self.progress = progress
+        activity = ScanProgress.Snapshot()
+        let polling = Task { [weak self] in
+            while !Task.isCancelled {
+                self?.activity = progress.snapshot
+                try? await Task.sleep(for: .milliseconds(150))
+            }
+        }
+        let value = await Task.detached(priority: .userInitiated) {
+            ScanProgress.$current.withValue(progress) { work() }
+        }.value
+        polling.cancel()
+        self.progress = nil
+        return (value, progress.isCancelled)
+    }
 }
 
 @MainActor
 final class AppModel: ObservableObject {
     @Published var module: Module? = .dashboard
     @Published var stats = SystemStats.current()
+    @Published private(set) var exclusions = Exclusions()
+    /// Tant qu'elle est renseignée, aucune suppression n'est permise : les exclusions sont inconnues.
+    @Published private(set) var exclusionsLoadError: String?
+    @Published private(set) var exclusionsSaveError: String?
 
     let environment = ScanEnvironment()
     private(set) lazy var stores: [Module: ScanStore] = makeStores()
+
+    private var support: URL { environment.library.appendingPathComponent("Application Support/macCleaner") }
+    private var exclusionsURL: URL { support.appendingPathComponent("exclusions.json") }
+    var history: CleanupHistory { CleanupHistory(fileURL: support.appendingPathComponent("history.jsonl")) }
+
+    init() {
+        loadExclusions()
+    }
+
+    func loadExclusions() {
+        do {
+            exclusions = try Exclusions.load(from: exclusionsURL)
+            exclusionsLoadError = nil
+        } catch {
+            exclusionsLoadError = "\(exclusionsURL.path) est illisible. Corrigez ou supprimez ce fichier."
+        }
+    }
+
+    func addExclusion(_ url: URL) {
+        var updated = exclusions
+        updated.add(url)
+        store(updated)
+    }
+
+    func removeExclusion(_ path: String) {
+        var updated = exclusions
+        updated.remove(path)
+        store(updated)
+    }
+
+    private func store(_ updated: Exclusions) {
+        guard exclusionsLoadError == nil else { return }
+        exclusions = updated
+        do {
+            try updated.save(to: exclusionsURL)
+            exclusionsSaveError = nil
+        } catch {
+            exclusionsSaveError = "Exclusions non enregistrées : \(error.localizedDescription)"
+        }
+    }
+
+    func makeRunner(module: Module) -> CleanupRunner? {
+        guard exclusionsLoadError == nil else { return nil }
+        return CleanupRunner(
+            environment: environment, exclusions: exclusions,
+            logURL: environment.library.appendingPathComponent("Logs/macCleaner/cleanup.log"),
+            history: history, module: module.title
+        )
+    }
 
     private func makeStores() -> [Module: ScanStore] {
         let environment = environment
@@ -139,12 +233,12 @@ final class AppModel: ObservableObject {
             !NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).isEmpty
         }
         return [
-            .smartCare: ScanStore(environment: environment) { JunkScanner(environment: environment).scanEssentials() },
-            .cleanup: ScanStore(environment: environment) { JunkScanner(environment: environment).scan() },
-            .performance: ScanStore(environment: environment) { PerformanceScanner(environment: environment).scan() },
-            .uninstaller: ScanStore(environment: environment) { apps.scanUninstaller() },
-            .leftovers: ScanStore(environment: environment) { apps.scanLeftovers() },
-            .clutter: ScanStore(environment: environment) { ClutterScanner(environment: environment).scan() },
+            .smartCare: ScanStore(module: .smartCare, model: self) { JunkScanner(environment: environment).scanEssentials() },
+            .cleanup: ScanStore(module: .cleanup, model: self) { JunkScanner(environment: environment).scan() },
+            .performance: ScanStore(module: .performance, model: self) { PerformanceScanner(environment: environment).scan() },
+            .uninstaller: ScanStore(module: .uninstaller, model: self) { apps.scanUninstaller() },
+            .leftovers: ScanStore(module: .leftovers, model: self) { apps.scanLeftovers() },
+            .clutter: ScanStore(module: .clutter, model: self) { ClutterScanner(environment: environment).scan() },
         ]
     }
 
@@ -153,4 +247,27 @@ final class AppModel: ObservableObject {
 
 func formatBytes(_ value: Int64) -> String {
     ByteCountFormatter.string(fromByteCount: value, countStyle: .file)
+}
+
+struct ActivityView: View {
+    let title: String
+    let activity: ScanProgress.Snapshot
+    let onCancel: () -> Void
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Spacer()
+            if let fraction = activity.fraction {
+                ProgressView(value: fraction).frame(maxWidth: 360)
+            } else {
+                ProgressView().controlSize(.large)
+            }
+            Text(title).font(.headline)
+            Text(activity.message).font(.caption).foregroundStyle(.secondary)
+                .lineLimit(1).truncationMode(.middle).frame(maxWidth: 520)
+            Button("Annuler", action: onCancel)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
+    }
 }

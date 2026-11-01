@@ -28,9 +28,10 @@ public struct SpaceScanner: Sendable {
         guard isDirectory else {
             return SpaceNode(url: url, size: FileSystem.allocatedSize(of: url), isDirectory: false, children: [])
         }
-        guard depth < maxDepth, !Task.isCancelled else {
+        guard depth < maxDepth, !ScanProgress.shouldStop else {
             return SpaceNode(url: url, size: FileSystem.allocatedSize(of: url), isDirectory: true, children: [])
         }
+        ScanProgress.current?.update(url.path)
         let entries = (try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: Array(Self.keys))) ?? []
         let children = entries
             .filter { ((try? $0.resourceValues(forKeys: Self.keys))?.volumeIdentifier as? NSObject) == volume }

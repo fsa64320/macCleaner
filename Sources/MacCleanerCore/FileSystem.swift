@@ -14,6 +14,7 @@ enum FileSystem {
         ) else { return 0 }
         var total: Int64 = 0
         for case let child as URL in walker {
+            if ScanProgress.shouldStop { break }
             let childValues = try? child.resourceValues(forKeys: sizeKeys)
             total += Int64(childValues?.totalFileAllocatedSize ?? childValues?.fileAllocatedSize ?? 0)
         }
@@ -26,6 +27,17 @@ enum FileSystem {
         return try? FileManager.default.contentsOfDirectory(
             at: url, includingPropertiesForKeys: Array(sizeKeys), options: []
         ).filter { $0.lastPathComponent != ".DS_Store" }
+    }
+
+    static func append(_ data: Data, to url: URL) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        guard let handle = try? FileHandle(forWritingTo: url) else {
+            try data.write(to: url)
+            return
+        }
+        defer { try? handle.close() }
+        _ = try handle.seekToEnd()
+        try handle.write(contentsOf: data)
     }
 
     /// Vrai aussi pour un lien symbolique cassé, contrairement à `fileExists`.

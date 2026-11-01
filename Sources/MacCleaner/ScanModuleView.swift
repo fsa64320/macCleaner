@@ -5,14 +5,15 @@ import SwiftUI
 struct ScanModuleView: View {
     let module: Module
     @ObservedObject var store: ScanStore
+    @EnvironmentObject private var model: AppModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ModuleHeader(module: module)
             switch store.phase {
             case .idle: intro
-            case .scanning: busy("Analyse en cours…")
-            case .cleaning: busy("Suppression en cours…")
+            case .scanning: ActivityView(title: "Analyse en cours…", activity: store.activity, onCancel: store.cancel)
+            case .cleaning: ActivityView(title: "Suppression en cours…", activity: store.activity, onCancel: store.cancel)
             case .results: results
             case .finished: finished
             }
@@ -44,16 +45,6 @@ struct ScanModuleView: View {
         .frame(maxWidth: .infinity)
     }
 
-    private func busy(_ title: String) -> some View {
-        VStack(spacing: 14) {
-            Spacer()
-            ProgressView().controlSize(.large)
-            Text(title).foregroundStyle(.secondary)
-            Spacer()
-        }
-        .frame(maxWidth: .infinity)
-    }
-
     private var results: some View {
         VStack(spacing: 0) {
             if !store.result.inaccessible.isEmpty {
@@ -66,6 +57,10 @@ struct ScanModuleView: View {
                     }
                 }
                 .padding(10).background(.yellow.opacity(0.18)).help(store.result.inaccessible.joined(separator: "\n"))
+            }
+            if let error = model.exclusionsLoadError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .padding(10).frame(maxWidth: .infinity, alignment: .leading).background(.red.opacity(0.15))
             }
             if store.result.categories.isEmpty {
                 ContentUnavailableView("Rien à signaler", systemImage: "checkmark.seal", description: Text("Aucun élément trouvé."))
@@ -82,7 +77,7 @@ struct ScanModuleView: View {
                 Spacer()
                 Text("\(store.selection.count) élément(s) · \(formatBytes(store.selectedSize))").monospacedDigit()
                 Button("Nettoyer…") { store.confirming = true }
-                    .buttonStyle(.borderedProminent).tint(module.tint).disabled(store.selection.isEmpty)
+                    .buttonStyle(.borderedProminent).tint(module.tint).disabled(store.selection.isEmpty || model.exclusionsLoadError != nil)
             }
             .padding(14).background(.bar)
         }
@@ -90,9 +85,17 @@ struct ScanModuleView: View {
 
     private var finished: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("\(formatBytes(store.report.freedSize)) traités").font(.largeTitle.bold())
-            Text("\(store.report.removed.count) élément(s) retiré(s). Le contenu envoyé à la Corbeille reste récupérable et ne libère l'espace qu'une fois celle-ci vidée.")
-                .foregroundStyle(.secondary)
+            Text("\(store.report.removed.count) élément(s) retiré(s)").font(.largeTitle.bold())
+            if store.report.trashedSize > 0 {
+                Text("\(formatBytes(store.report.trashedSize)) dans la Corbeille : récupérable, l'espace revient une fois celle-ci vidée.")
+                    .foregroundStyle(.secondary)
+            }
+            if store.report.permanentSize > 0 {
+                Text("\(formatBytes(store.report.permanentSize)) supprimés définitivement.").foregroundStyle(.secondary)
+            }
+            if store.report.cancelledCount > 0 {
+                Text("Interrompu : \(store.report.cancelledCount) élément(s) non traité(s).").foregroundStyle(.orange)
+            }
             if !store.report.failures.isEmpty {
                 Text("\(store.report.failures.count) échec(s)").font(.headline).foregroundStyle(.red)
                 List(store.report.failures) { failure in
@@ -142,6 +145,7 @@ private struct CategoryRow: View {
                 }
                 .contextMenu {
                     Button("Afficher dans le Finder") { NSWorkspace.shared.activateFileViewerSelecting([item.url]) }
+                    Button("Ne plus proposer") { store.exclude(item) }
                 }
             }
             if category.items.count > 500 {

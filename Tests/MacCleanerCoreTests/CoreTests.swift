@@ -7,7 +7,7 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
     var trashed: [URL] = []
     var deleted: [URL] = []
     var unloaded: [String] = []
-    func moveToTrash(_ url: URL) throws { trashed.append(url) }
+    func moveToTrash(_ url: URL) throws -> URL? { trashed.append(url); return nil }
     func deletePermanently(_ url: URL) throws { deleted.append(url) }
     func unloadLaunchAgent(label: String) throws { unloaded.append(label) }
 }
@@ -98,7 +98,8 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
         #expect(remover.trashed == [cache, agent])
         #expect(remover.deleted == [trashed])
         #expect(remover.unloaded == ["com.a"])
-        #expect(report.freedSize == 70)
+        #expect(report.trashedSize == 50)
+        #expect(report.permanentSize == 20)
         #expect(report.failures.map(\.item.url) == [keychain])
         #expect(report.skipped.count == 2)
     }
@@ -108,6 +109,106 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
         let log = home.appendingPathComponent("logs/cleanup.log")
         _ = CleanupRunner(remover: RecordingRemover(), environment: env, logURL: log).run([ScanItem(url: cache, size: 1)])
         #expect(try String(contentsOf: log, encoding: .utf8).contains(cache.path))
+    }
+
+    @Test func testRunnerSkipsExcludedAndWritesHistory() throws {
+        let kept = try write("Library/Caches/keep/data")
+        let removed = try write("Library/Caches/drop")
+        let remover = RecordingRemover()
+        let history = CleanupHistory(fileURL: home.appendingPathComponent("support/history.jsonl"))
+        var exclusions = Exclusions()
+        exclusions.add(kept)
+        let report = CleanupRunner(remover: remover, environment: env, exclusions: exclusions, history: history, module: "Test").run([
+            ScanItem(url: kept.deletingLastPathComponent(), size: 5),
+            ScanItem(url: removed, size: 7),
+        ])
+        #expect(remover.trashed == [removed])
+        #expect(report.skipped.count == 1)
+        let entry = try #require(history.load().entries.first)
+        #expect(entry.module == "Test")
+        #expect(entry.trashedBytes == 7)
+        #expect(entry.paths == [removed.path])
+    }
+
+    @Test func testRunnerStopsWhenCancelled() throws {
+        let first = try write("Library/Caches/a")
+        let progress = ScanProgress()
+        progress.cancel()
+        let remover = RecordingRemover()
+        let report = ScanProgress.$current.withValue(progress) {
+            CleanupRunner(remover: remover, environment: env).run([ScanItem(url: first, size: 1)])
+        }
+        #expect(remover.trashed.isEmpty)
+        #expect(report.cancelledCount == 1)
+    }
+
+    @Test func testHistorySurvivesCorruptLine() throws {
+        let url = home.appendingPathComponent("history.jsonl")
+        let history = CleanupHistory(fileURL: url)
+        let entry = HistoryEntry(date: Date(), module: "A", removedCount: 1, trashedBytes: 1, permanentBytes: 0, failureCount: 0, cancelledCount: 0, paths: [])
+        try history.append(entry)
+        try FileSystem.append(Data("pas du json\n".utf8), to: url)
+        try history.append(entry)
+        let loaded = history.load()
+        #expect(loaded.entries.count == 2)
+        #expect(loaded.unreadableLines == 1)
+    }
+
+    // MARK: Exclusions
+
+    @Test func testExclusionsCoverChildrenAndParents() {
+        var exclusions = Exclusions()
+        exclusions.add(home.appendingPathComponent("Library/Caches/app/keep"))
+        #expect(exclusions.covers(home.appendingPathComponent("Library/Caches/app/keep/file")))
+        #expect(exclusions.covers(home.appendingPathComponent("Library/Caches/app")))
+        #expect(!exclusions.covers(home.appendingPathComponent("Library/Caches/app/keep2")))
+    }
+
+    @Test func testExclusionsRoundTripAndRejectCorruptFile() throws {
+        let url = home.appendingPathComponent("support/exclusions.json")
+        #expect(try Exclusions.load(from: url).paths.isEmpty)
+        var exclusions = Exclusions()
+        exclusions.add(home.appendingPathComponent("x"))
+        try exclusions.save(to: url)
+        #expect(try Exclusions.load(from: url) == exclusions)
+        try Data("{".utf8).write(to: url)
+        #expect(throws: (any Error).self) { try Exclusions.load(from: url) }
+    }
+
+    @Test func testExclusionsFilterResults() throws {
+        let kept = try write("Library/Caches/keep")
+        let other = try write("Library/Caches/other")
+        var exclusions = Exclusions()
+        exclusions.add(kept)
+        let result = exclusions.applied(to: JunkScanner(environment: env).scan())
+        #expect(result.categories.flatMap(\.items).map(\.url.lastPathComponent) == [other.lastPathComponent])
+    }
+
+    // MARK: Annulation
+
+    @Test func testCancelledScanStopsEarly() throws {
+        try write("Library/Caches/a/data")
+        let progress = ScanProgress()
+        progress.cancel()
+        let result = ScanProgress.$current.withValue(progress) { JunkScanner(environment: env).scan() }
+        #expect(result.categories.isEmpty)
+    }
+
+    @Test func testProgressReportsCurrentFolder() throws {
+        try write("Library/Caches/a/data")
+        let progress = ScanProgress()
+        _ = ScanProgress.$current.withValue(progress) { JunkScanner(environment: env).scanEssentials() }
+        #expect(!progress.snapshot.message.isEmpty)
+    }
+
+    // MARK: Maintenance
+
+    @Test func testMaintenanceScriptsCompile() throws {
+        for task in MaintenanceTask.allCases {
+            let script = try #require(NSAppleScript(source: task.appleScript))
+            var error: NSDictionary?
+            #expect(script.compileAndReturnError(&error), "\(task)")
+        }
     }
 
     // MARK: Scanners

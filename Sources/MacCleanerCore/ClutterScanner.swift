@@ -47,6 +47,8 @@ public struct ClutterScanner: Sendable {
         ) else { return [] }
         var files: [FileEntry] = []
         for case let url as URL in walker {
+            if ScanProgress.shouldStop { break }
+            ScanProgress.current?.update(url.deletingLastPathComponent().path)
             if Self.skippedFolders.contains(url.lastPathComponent) { walker.skipDescendants(); continue }
             guard let values = try? url.resourceValues(forKeys: Self.keys), values.isRegularFile == true else { continue }
             // Un fichier resté dans le cloud n'occupe rien et serait téléchargé par le hachage.
@@ -73,7 +75,9 @@ public struct ClutterScanner: Sendable {
     private func duplicates(_ files: [FileEntry]) -> ScanCategory {
         let candidates = Dictionary(grouping: files.filter { $0.size >= duplicateMinimum }, by: \.size).values.filter { $0.count > 1 }
         var items: [ScanItem] = []
-        for group in candidates {
+        for (index, group) in candidates.enumerated() {
+            if ScanProgress.shouldStop { break }
+            ScanProgress.current?.update("Comparaison des doublons", fraction: Double(index) / Double(candidates.count))
             // Deux chemins vers le même inode ne libèrent rien.
             var seenInodes = Set<String>()
             let distinct = group.filter { seenInodes.insert($0.identifier).inserted }
@@ -105,6 +109,7 @@ public struct ClutterScanner: Sendable {
         defer { try? handle.close() }
         var hasher = SHA256()
         while let chunk = try? handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+            if ScanProgress.shouldStop { return nil }
             hasher.update(data: chunk)
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()

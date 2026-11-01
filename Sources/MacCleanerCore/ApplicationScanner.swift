@@ -22,7 +22,7 @@ public struct ApplicationScanner: Sendable {
                 at: directory, includingPropertiesForKeys: nil,
                 options: [.skipsHiddenFiles, .skipsPackageDescendants], errorHandler: { _, _ in true }
             )
-            while let url = walker?.nextObject() as? URL {
+            while !ScanProgress.shouldStop, let url = walker?.nextObject() as? URL {
                 if (walker?.level ?? 0) > 3 { walker?.skipDescendants(); continue }
                 guard url.pathExtension == "app", let app = readApp(url) else { continue }
                 apps.append(app)
@@ -37,7 +37,10 @@ public struct ApplicationScanner: Sendable {
         let apps = installedApps(in: env.applicationDirectories).filter {
             !$0.bundleID.hasPrefix("com.apple.") && $0.bundleID != selfID
         }
-        let categories = apps.map { app -> ScanCategory in
+        var categories: [ScanCategory] = []
+        for (index, app) in apps.enumerated() {
+            if ScanProgress.shouldStop { break }
+            ScanProgress.current?.update(app.name, fraction: Double(index) / Double(apps.count))
             let running = isRunning(app.bundleID)
             var items = [ScanItem(
                 url: app.url, name: app.name,
@@ -47,7 +50,7 @@ public struct ApplicationScanner: Sendable {
             items += relatedFiles(of: app).map {
                 ScanItem(url: $0, detail: "Fichier lié", size: FileSystem.allocatedSize(of: $0))
             }
-            return ScanCategory(id: "app-\(app.url.path)", title: app.name, summary: app.bundleID, items: items)
+            categories.append(ScanCategory(id: "app-\(app.url.path)", title: app.name, summary: app.bundleID, items: items))
         }
         return ScanResult(categories: categories.sorted { $0.totalSize > $1.totalSize })
     }
@@ -80,6 +83,7 @@ public struct ApplicationScanner: Sendable {
         var items: [ScanItem] = []
         for folder in ["Application Support", "Caches", "Containers", "Preferences", "Saved Application State", "HTTPStorages"] {
             for url in collector.children(of: env.library.appendingPathComponent(folder)) {
+                if ScanProgress.shouldStop { break }
                 guard let bundleID = Self.bundleID(fromFileName: url.lastPathComponent),
                       !bundleID.hasPrefix("com.apple."), !vendors.contains(Self.vendor(of: bundleID)) else { continue }
                 items.append(ScanItem(url: url, detail: "\(folder) · aucune app installée de cet éditeur", size: FileSystem.allocatedSize(of: url)))

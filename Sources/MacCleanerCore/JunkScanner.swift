@@ -145,6 +145,8 @@ struct Collector {
     var denied: Set<String> = []
 
     mutating func children(of url: URL) -> [URL] {
+        if ScanProgress.shouldStop { return [] }
+        ScanProgress.current?.update(url.path)
         guard let children = FileSystem.children(of: url) else {
             denied.insert(url.path)
             return []

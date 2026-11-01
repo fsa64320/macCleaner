@@ -59,6 +59,10 @@ public enum MaintenanceTask: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    var appleScript: String {
+        "do shell script \"\(command)\" with administrator privileges"
+    }
+
     var command: String {
         switch self {
         case .flushDNS: "/usr/bin/dscacheutil -flushcache; /usr/bin/killall -HUP mDNSResponder"
@@ -70,11 +74,10 @@ public enum MaintenanceTask: String, CaseIterable, Identifiable, Sendable {
 
     /// macOS affiche sa propre demande de mot de passe : macCleaner ne le voit jamais.
     public func run() throws -> String {
-        let script = "do shell script \"\(command)\" with administrator privileges"
         let process = Process()
         let output = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", script]
+        process.arguments = ["-e", appleScript]
         process.standardOutput = output
         process.standardError = output
         try process.run()

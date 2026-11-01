@@ -21,6 +21,7 @@ struct RootView: View {
         ("Nettoyer", [.cleanup, .clutter, .spaceLens]),
         ("Applications", [.uninstaller, .leftovers]),
         ("Système", [.performance, .maintenance]),
+        ("macCleaner", [.history, .exclusions]),
     ]
 
     var body: some View {
@@ -36,7 +37,7 @@ struct RootView: View {
             }
             .navigationSplitViewColumnWidth(min: 210, ideal: 230)
         } detail: {
-            detail.background(background)
+            detail.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading).background(background)
         }
     }
 
@@ -46,6 +47,8 @@ struct RootView: View {
         case .dashboard: DashboardView()
         case .maintenance: MaintenanceView()
         case .spaceLens: SpaceLensView()
+        case .history: HistoryView()
+        case .exclusions: ExclusionsView()
         default:
             if let store = model.stores[module] {
                 ScanModuleView(module: module, store: store).id(module)
