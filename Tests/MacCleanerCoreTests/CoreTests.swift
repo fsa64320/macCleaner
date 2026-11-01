@@ -878,6 +878,126 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
         #expect(CommandLineToolParsers.uvTools("").isEmpty)
         #expect(CommandLineToolParsers.uvOutdated("").isEmpty)
     }
+
+    // MARK: Scanner d'outils en ligne de commande
+
+    private static let brewJSON = """
+    {"formulae":[
+     {"full_name":"ripgrep","outdated":false,"installed":[{"version":"14.1","installed_on_request":true,"runtime_dependencies":[{"full_name":"pcre2"}]}]},
+     {"full_name":"pcre2","outdated":false,"installed":[{"version":"10.4","installed_on_request":false,"runtime_dependencies":[]}]},
+     {"full_name":"arthur-ficial/tap/apfel-gui","outdated":false,"installed":[{"version":"1.0","installed_on_request":true,"runtime_dependencies":[]}]},
+     {"full_name":"node@24","outdated":false,"installed":[{"version":"24.1","installed_on_request":true,"runtime_dependencies":[]}]},
+     {"full_name":"python@3.14","outdated":false,"installed":[{"version":"3.14","installed_on_request":true,"runtime_dependencies":[]}]},
+     {"full_name":"openjdk@21","outdated":false,"installed":[{"version":"21","installed_on_request":true,"runtime_dependencies":[]}]},
+     {"full_name":"gh","outdated":false,"installed":[{"version":"2.0","installed_on_request":true,"runtime_dependencies":[]}]},
+     {"full_name":"rea-agents","outdated":false,"installed":[{"version":"1.0","installed_on_request":true,"runtime_dependencies":[]}]},
+     {"full_name":"uv","outdated":false,"installed":[{"version":"0.5","installed_on_request":true,"runtime_dependencies":[]}]}
+    ],"casks":[]}
+    """
+    private static let npmJSON = #"{"dependencies":{"npm":{"version":"10.0.0"},"corepack":{"version":"0.30.0"},"omniroute":{"version":"3.8.52"}}}"#
+    private static let npmOutdatedJSON = #"{"omniroute":{"current":"3.8.52","latest":"3.9.0"}}"#
+    private static let uvText = "graphifyy v0.9.95 (/x/graphifyy)\n- graphify (/x/bin/graphify)\n"
+    private static let uvOutdatedText = "graphifyy v0.9.95 [latest: 0.9.100]\n- graphify\n"
+
+    private func toolRunner(
+        npmOutdatedFails: Bool = false, uv: Bool = true
+    ) -> CommandLineTools.Runner {
+        { source, arguments, _ in
+            func out(_ text: String, _ status: Int32 = 0) -> Docker.Output { Docker.Output(data: Data(text.utf8), status: status) }
+            switch (source, arguments.joined(separator: " ")) {
+            case (.brew, "info --json=v2 --installed"): return out(CoreTests.brewJSON)
+            case (.npm, "ls -g --depth=0 --json"): return out(CoreTests.npmJSON)
+            case (.npm, "outdated -g --json"): return npmOutdatedFails ? nil : Docker.Output(data: Data(CoreTests.npmOutdatedJSON.utf8), status: 1)
+            case (.uv, "tool list --show-paths"): return uv ? out(CoreTests.uvText) : nil
+            case (.uv, "tool list --outdated"): return uv ? out(CoreTests.uvOutdatedText) : nil
+            default: return nil
+            }
+        }
+    }
+
+    private func toolScan(_ run: @escaping CommandLineTools.Runner) throws -> ScanResult {
+        for folder in ["brew/Cellar/ripgrep", "brew/Cellar/pcre2", "brew/Cellar/apfel-gui"] {
+            try write("\(folder)/file.bin", bytes: 20_000)
+        }
+        let locations = CommandLineToolScanner.Locations(
+            homebrew: home.appendingPathComponent("brew"), npmRoot: home.appendingPathComponent("npm"),
+            uvTools: home.appendingPathComponent("uv")
+        )
+        return CommandLineToolScanner(environment: env, run: run, locations: locations).scan()
+    }
+
+    private func toolItem(_ result: ScanResult, _ category: String, _ label: String) -> ScanItem? {
+        result.categories.first { $0.id == category }?.items.first { $0.launchLabel == label }
+    }
+
+    @Test func testToolScanListsTopLevelOnly() throws {
+        let result = try toolScan(toolRunner())
+        #expect(result.categories.map(\.id) == ["cli.brew", "cli.npm", "cli.uv"])
+        #expect(result.categories.map(\.title) == ["Homebrew", "npm", "uv"])
+        #expect(toolItem(result, "cli.brew", "brew:pcre2") == nil)
+        let ripgrep = try #require(toolItem(result, "cli.brew", "brew:ripgrep"))
+        #expect(ripgrep.removalArguments == ["pcre2"])
+        #expect(ripgrep.size > 2 * 8192)
+        #expect(ripgrep.size == FileSystem.allocatedSize(of: home.appendingPathComponent("brew/Cellar/ripgrep"))
+            + FileSystem.allocatedSize(of: home.appendingPathComponent("brew/Cellar/pcre2")))
+        #expect(ripgrep.detail.contains("14.1") && ripgrep.detail.contains("emporte 1 dépendance"))
+        #expect(!ripgrep.selectedByDefault)
+        #expect(ripgrep.removal == .commandLineTool)
+        #expect(ripgrep.reinstallCommand == "brew install ripgrep")
+    }
+
+    @Test func testToolScanResolvesTapFolder() throws {
+        let result = try toolScan(toolRunner())
+        let item = try #require(toolItem(result, "cli.brew", "brew:arthur-ficial/tap/apfel-gui"))
+        #expect(item.url == home.appendingPathComponent("brew/Cellar/apfel-gui"))
+        #expect(item.size > 0)
+        let missing = try #require(toolItem(result, "cli.brew", "brew:gh"))
+        #expect(missing.size == 0)
+    }
+
+    @Test func testToolScanLocksCorePackages() throws {
+        let result = try toolScan(toolRunner())
+        #expect(try #require(toolItem(result, "cli.npm", "npm:npm")).locked)
+        #expect(try #require(toolItem(result, "cli.npm", "npm:corepack")).locked)
+        #expect(try !#require(toolItem(result, "cli.npm", "npm:omniroute")).locked)
+        #expect(try #require(toolItem(result, "cli.brew", "brew:uv")).locked)
+    }
+
+    @Test func testToolScanWarnsForRuntimes() throws {
+        let result = try toolScan(toolRunner())
+        let node = try #require(toolItem(result, "cli.brew", "brew:node@24"))
+        #expect(node.detail.contains("omniroute"))
+        #expect(!node.detail.contains("corepack"))
+        for label in ["brew:python@3.14", "brew:openjdk@21", "brew:gh", "brew:rea-agents"] {
+            #expect(try #require(toolItem(result, "cli.brew", label)).detail.contains("Attention"))
+        }
+    }
+
+    @Test func testToolScanShowsUpdates() throws {
+        let result = try toolScan(toolRunner())
+        let uv = try #require(toolItem(result, "cli.uv", "uv:graphifyy"))
+        #expect(uv.detail.contains("0.9.100"))
+        #expect(uv.reinstallCommand == "uv tool install graphifyy==0.9.95")
+        let npm = try #require(toolItem(result, "cli.npm", "npm:omniroute"))
+        #expect(npm.detail.contains("3.9.0"))
+        #expect(npm.reinstallCommand == "npm install -g omniroute@3.8.52")
+    }
+
+    @Test func testToolScanKeepsListWhenOutdatedFails() throws {
+        let result = try toolScan(toolRunner(npmOutdatedFails: true))
+        let npm = try #require(toolItem(result, "cli.npm", "npm:omniroute"))
+        #expect(!npm.detail.contains("mise à jour"))
+    }
+
+    @Test func testToolScanAcceptsNpmOutdatedStatusOne() throws {
+        let result = try toolScan(toolRunner())
+        #expect(try #require(toolItem(result, "cli.npm", "npm:omniroute")).detail.contains("mise à jour 3.9.0"))
+    }
+
+    @Test func testToolScanSkipsMissingSources() throws {
+        let result = try toolScan(toolRunner(uv: false))
+        #expect(result.categories.map(\.id) == ["cli.brew", "cli.npm"])
+    }
 }
 
 private extension URL {
