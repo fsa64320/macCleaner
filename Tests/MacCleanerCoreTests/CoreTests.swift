@@ -21,6 +21,17 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
     func evictLocalCopy(_ url: URL) throws { evicted.append(url) }
     var dockerImages: [String] = []
     func removeDockerImage(_ identifier: String) throws { dockerImages.append(identifier) }
+    var tools: [(identifier: String, arguments: [String])] = []
+    var failingTools: Set<String> = []
+    var failureMessage = "échec simulé"
+    struct ToolFailure: LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
+    func uninstallCommandLineTool(_ identifier: String, arguments: [String]) throws {
+        if failingTools.contains(identifier) { throw ToolFailure(message: failureMessage) }
+        tools.append((identifier, arguments))
+    }
     func deletePermanently(_ url: URL) throws { deleted.append(url) }
     func unloadLaunchAgent(label: String) throws { unloaded.append(label) }
 }
@@ -570,6 +581,146 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
         #expect(report.permanentSize == 9)
     }
 
+    @Test func testRunnerUninstallsCommandLineTool() throws {
+        let url = home.appendingPathComponent("Cellar/ripgrep")
+        let item = ScanItem(url: url, size: 10, removal: .commandLineTool, launchLabel: "brew:ripgrep",
+                            removalArguments: ["pcre2"], reinstallCommand: "brew install ripgrep")
+        let remover = RecordingRemover()
+        let report = CleanupRunner(remover: remover, environment: env).run([item])
+        #expect(remover.tools.map(\.identifier) == ["brew:ripgrep"])
+        #expect(remover.tools.first?.arguments == ["pcre2"])
+        #expect(report.permanentSize == 10)
+    }
+
+    @Test func testRunnerSkipsExcludedAndLockedTools() throws {
+        let excludedURL = home.appendingPathComponent("Cellar/excluded")
+        var exclusions = Exclusions()
+        exclusions.add(excludedURL)
+        let remover = RecordingRemover()
+        let report = CleanupRunner(remover: remover, environment: env, exclusions: exclusions).run([
+            ScanItem(url: excludedURL, size: 1, removal: .commandLineTool, launchLabel: "brew:excluded"),
+            ScanItem(url: home.appendingPathComponent("Cellar/locked"), size: 1, removal: .commandLineTool, launchLabel: "brew:locked", locked: true),
+        ])
+        #expect(report.skipped.count == 2)
+        #expect(remover.tools.isEmpty)
+    }
+
+    @Test func testRunnerContinuesAfterToolFailure() throws {
+        let broken = home.appendingPathComponent("Cellar/broken")
+        let fine = home.appendingPathComponent("Cellar/fine")
+        let remover = RecordingRemover()
+        remover.failingTools = ["brew:broken"]
+        let report = CleanupRunner(remover: remover, environment: env).run([
+            ScanItem(url: broken, size: 1, removal: .commandLineTool, launchLabel: "brew:broken"),
+            ScanItem(url: fine, size: 2, removal: .commandLineTool, launchLabel: "brew:fine"),
+        ])
+        #expect(report.failures.count == 1)
+        #expect(report.removed.count == 1)
+        #expect(remover.tools.map(\.identifier) == ["brew:fine"])
+        #expect(!FileManager.default.fileExists(atPath: fine.path))
+    }
+
+    @Test func testHistoryKeepsReinstallCommands() throws {
+        let history = CleanupHistory(fileURL: home.appendingPathComponent("history.jsonl"))
+        let item = ScanItem(url: home.appendingPathComponent("Cellar/ripgrep"), size: 10, removal: .commandLineTool,
+                            launchLabel: "brew:ripgrep", reinstallCommand: "brew install ripgrep")
+        _ = CleanupRunner(remover: RecordingRemover(), environment: env, history: history, module: "Test").run([item])
+        #expect(history.load().entries.first?.reinstallCommands == ["brew install ripgrep"])
+    }
+
+    @Test func testRunnerSkipsToolWithExcludedDependency() throws {
+        let dependency = home.appendingPathComponent("Cellar/gts")
+        var exclusions = Exclusions()
+        exclusions.add(dependency)
+        let remover = RecordingRemover()
+        let report = CleanupRunner(remover: remover, environment: env, exclusions: exclusions).run([
+            ScanItem(url: home.appendingPathComponent("Cellar/graphviz"), size: 1, removal: .commandLineTool,
+                     launchLabel: "brew:graphviz", removalArguments: ["gts"], dependencyPaths: [dependency]),
+        ])
+        #expect(report.skipped.count == 1)
+        #expect(remover.tools.isEmpty)
+    }
+
+    @Test func testRemovedDependenciesLeaveTraces() throws {
+        let history = CleanupHistory(fileURL: home.appendingPathComponent("history.jsonl"))
+        let log = home.appendingPathComponent("cleanup.log")
+        let tool = home.appendingPathComponent("Cellar/graphviz")
+        let dependency = home.appendingPathComponent("Cellar/gts")
+        let item = ScanItem(url: tool, size: 10, removal: .commandLineTool, launchLabel: "brew:graphviz",
+                            removalArguments: ["gts"], dependencyPaths: [dependency])
+        _ = CleanupRunner(remover: RecordingRemover(), environment: env, logURL: log, history: history, module: "Test").run([item])
+        #expect(history.load().entries.first?.paths == [tool.path, dependency.path])
+        let lines = try String(contentsOf: log, encoding: .utf8).split(separator: "\n")
+        #expect(lines.count == 2)
+        #expect(lines[1].hasSuffix("OK commandLineTool \(dependency.path) (dépendance de graphviz)"))
+    }
+
+    @Test func testFailureReasonStaysOnOneLogLine() throws {
+        let log = home.appendingPathComponent("cleanup.log")
+        let remover = RecordingRemover()
+        remover.failingTools = ["brew:broken"]
+        remover.failureMessage = "Error: un\nFAUX OK\r\ndeux"
+        let item = ScanItem(url: home.appendingPathComponent("Cellar/broken"), size: 1, removal: .commandLineTool, launchLabel: "brew:broken")
+        let report = CleanupRunner(remover: remover, environment: env, logURL: log).run([item])
+        let text = try String(contentsOf: log, encoding: .utf8)
+        #expect(text.split(whereSeparator: \.isNewline).count == 1)
+        #expect(text.contains("Error: un FAUX OK deux"))
+        #expect(report.failures.first?.reason.contains("\n") == true)
+    }
+
+    private func tool(_ name: String, deps: [String] = [], warning: String? = nil) -> ScanItem {
+        ScanItem(url: home.appendingPathComponent(name), name: name, size: 1, removal: .commandLineTool,
+                 launchLabel: "brew:\(name)", removalArguments: deps, warning: warning)
+    }
+
+    @Test func testConfirmationNamesToolsDependenciesAndAlerts() {
+        let text = CommandLineToolConfirmation.message(
+            for: [tool("graphviz", deps: ["gts", "netpbm"]), tool("node@24", warning: "Attention : environnement d'exécution")],
+            formattedSize: "12 Mo"
+        )
+        #expect(text.contains("12 Mo"))
+        #expect(text.contains("définitivement") && text.contains("Corbeille"))
+        #expect(text.contains("graphviz, avec gts, netpbm"))
+        #expect(text.contains("node@24"))
+        #expect(text.contains("Attention : environnement d'exécution"))
+    }
+
+    @Test func testConfirmationBoundsLists() {
+        let deps = (1...11).map { "dep\($0)" }
+        let tools = [tool("first", deps: deps)] + (1...14).map { tool("tool\($0)") }
+        let text = CommandLineToolConfirmation.message(for: tools, formattedSize: "1 Mo")
+        #expect(text.contains("dep8") && !text.contains("dep9"))
+        #expect(text.contains("et 3 autre(s)"))
+        #expect(text.contains("tool11") && !text.contains("tool12"))
+        #expect(text.contains("et 3 autre(s) outil(s)"))
+    }
+
+    @Test func testConfirmationKeepsAlertsPastTheBound() {
+        let tools = (1...13).map { tool("tool\($0)") } + [tool("gh", warning: "Attention : outil de ce dépôt")]
+        let text = CommandLineToolConfirmation.message(for: tools, formattedSize: "1 Mo")
+        #expect(text.contains("Attention : outil de ce dépôt"))
+        let warned = (1...14).map { tool("w\($0)", warning: "Attention : a\($0)") }
+        let bounded = CommandLineToolConfirmation.message(for: warned, formattedSize: "1 Mo")
+        #expect(bounded.contains("et 2 autre(s) outil(s), dont 2 avec alerte"))
+    }
+
+    @Test func testConfirmationListingForMixedSelection() {
+        #expect(CommandLineToolConfirmation.listing(for: []).isEmpty)
+        let listing = CommandLineToolConfirmation.listing(for: [tool("gh", warning: "Attention : outil de ce dépôt")])
+        #expect(listing.contains("gh") && listing.contains("Attention : outil de ce dépôt"))
+        #expect(!listing.contains("Corbeille"))
+    }
+
+    @Test func testHistoryReadsOldLines() throws {
+        let url = home.appendingPathComponent("history.jsonl")
+        let line = #"{"date":"2026-01-01T00:00:00Z","module":"A","removedCount":1,"trashedBytes":1,"permanentBytes":0,"failureCount":0,"cancelledCount":0,"paths":[]}"#
+        try Data((line + "\n").utf8).write(to: url)
+        let loaded = CleanupHistory(fileURL: url).load()
+        #expect(loaded.entries.count == 1)
+        #expect(loaded.entries.first?.reinstallCommands == nil)
+        #expect(loaded.unreadableLines == 0)
+    }
+
     @Test func testDockerRejectsUnsafeIdentifiers() {
         #expect(Docker.isValid(identifier: "abcdef123456"))
         #expect(!Docker.isValid(identifier: "--force"))
@@ -682,6 +833,462 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
                 #expect(overlap.isNull || overlap.width * overlap.height < 0.01)
             }
         }
+    }
+
+    @Test func testToolIdentifierKeepsScopedName() throws {
+        let id = try #require(CommandLineTools.Identifier(encoded: "npm:@anthropic-ai/claude-code"))
+        #expect(id.source == .npm && id.name == "@anthropic-ai/claude-code")
+        #expect(id.encoded == "npm:@anthropic-ai/claude-code")
+        #expect(CommandLineTools.Identifier(encoded: "pip:x") == nil)
+    }
+
+    @Test func testToolNameValidation() {
+        for name in ["ripgrep", "node@24", "@anthropic-ai/claude-code", "arthur-ficial/tap/apfel-gui", "graphifyy"] {
+            #expect(CommandLineTools.isValid(name: name))
+        }
+        for name in ["--force", "-g", "a b", "a;rm", "", "../x", "ripgrep\n"] {
+            #expect(!CommandLineTools.isValid(name: name))
+        }
+    }
+
+    @Test func testCommandEnvironmentDisablesAutoremove() {
+        let environment = CommandLineTools.commandEnvironment(
+            from: ["HOME": "/Users/x", "PATH": "/ailleurs"], searchDirectories: ["/opt/homebrew/bin"]
+        )
+        #expect(environment["HOMEBREW_NO_AUTOREMOVE"] == "1")
+        #expect(environment["HOMEBREW_NO_AUTO_UPDATE"] == "1")
+        #expect(environment["PATH"] == "/opt/homebrew/bin:/usr/bin:/bin")
+        #expect(environment["HOME"] == "/Users/x")
+        #expect(CommandLineTools.commandEnvironment(from: ["HOMEBREW_NO_AUTOREMOVE": "0"], searchDirectories: [])["HOMEBREW_NO_AUTOREMOVE"] == "1")
+    }
+
+    @Test func testCaskRunsThroughBrew() {
+        #expect(CommandLineTools.executableName(for: .cask) == "brew")
+        #expect(CommandLineTools.executableName(for: .brew) == "brew")
+        #expect(CommandLineTools.executableName(for: .npm) == "npm")
+        #expect(CommandLineTools.executableName(for: .uv) == "uv")
+    }
+
+    @Test func testUninstallCommandDropsVanishedDependencies() throws {
+        try write("brew/Cellar/graphviz/1/f")
+        try write("brew/Cellar/gts/1/f")
+        try write("brew/Cellar/apfel/1/f")
+        let prefix = home.appendingPathComponent("brew")
+        let brew = CommandLineTools.Identifier(source: .brew, name: "graphviz")
+        let command = try CommandLineTools.uninstallCommand(brew, extra: ["gts", "disparu", "user/tap/apfel", "user/tap/parti"], homebrewPrefix: prefix)
+        #expect(command == ["uninstall", "--", "graphviz", "gts", "user/tap/apfel"])
+    }
+
+    @Test func testUninstallCommandKeepsMissingToolItself() throws {
+        let brew = CommandLineTools.Identifier(source: .brew, name: "disparu")
+        let command = try CommandLineTools.uninstallCommand(brew, extra: [], homebrewPrefix: home.appendingPathComponent("brew"))
+        #expect(command == ["uninstall", "--", "disparu"])
+    }
+
+    @Test func testUninstallCommandStillRejectsInvalidExtras() {
+        let brew = CommandLineTools.Identifier(source: .brew, name: "graphviz")
+        #expect(throws: (any Error).self) {
+            try CommandLineTools.uninstallCommand(brew, extra: ["--force"], homebrewPrefix: self.home)
+        }
+    }
+
+    @Test func testUninstallCommandFiltersOnlyHomebrewFormulae() throws {
+        let npm = CommandLineTools.Identifier(source: .npm, name: "omniroute")
+        let command = try CommandLineTools.uninstallCommand(npm, extra: ["x"], homebrewPrefix: home)
+        #expect(command == ["uninstall", "-g", "--", "omniroute", "x"])
+    }
+
+    @Test func testUninstallArguments() throws {
+        let brew = CommandLineTools.Identifier(source: .brew, name: "graphviz")
+        #expect(try CommandLineTools.uninstallArguments(brew, extra: ["gts"]) == ["uninstall", "--", "graphviz", "gts"])
+        let cask = CommandLineTools.Identifier(source: .cask, name: "1password-cli")
+        #expect(try CommandLineTools.uninstallArguments(cask, extra: []) == ["uninstall", "--cask", "--", "1password-cli"])
+        let npm = CommandLineTools.Identifier(source: .npm, name: "omniroute")
+        #expect(try CommandLineTools.uninstallArguments(npm, extra: []) == ["uninstall", "-g", "--", "omniroute"])
+        let uv = CommandLineTools.Identifier(source: .uv, name: "graphifyy")
+        #expect(try CommandLineTools.uninstallArguments(uv, extra: []) == ["tool", "uninstall", "--", "graphifyy"])
+        #expect(throws: (any Error).self) { try CommandLineTools.uninstallArguments(brew, extra: ["--force"]) }
+    }
+
+    @Test func testUninstallRejectsMalformedIdentifierBeforeAnyProcess() {
+        for identifier in ["", "graphviz", "npm:", "npm:--force", "brew:a b", "pip:x"] {
+            #expect(throws: (any Error).self) { try CommandLineTools.uninstall(identifier: identifier, arguments: []) }
+        }
+        #expect(throws: (any Error).self) {
+            try CommandLineTools.uninstall(identifier: "brew:graphviz", arguments: ["--ignore-dependencies"])
+        }
+    }
+
+    @Test func testFailureMessageReportsTimeoutAndEmptyOutput() {
+        let timeout = CommandLineTools.failureMessage(.init(data: Data(), status: 15, timedOut: true))
+        #expect(timeout?.contains("incomplet") == true)
+        let silent = CommandLineTools.failureMessage(.init(data: Data(), status: 3, timedOut: false))
+        #expect(silent?.contains("3") == true)
+        let printed = CommandLineTools.failureMessage(.init(data: Data("boom".utf8), status: 1, timedOut: false))
+        #expect(printed == "boom")
+        #expect(CommandLineTools.failureMessage(.init(data: Data(), status: 0, timedOut: false)) == nil)
+    }
+
+    @Test func testLaunchReportsTimeoutAndStopsProcess() throws {
+        let started = Date()
+        let result = try #require(CommandLineTools.launch("/bin/sleep", ["30"], timeout: 0.3, grace: 0.3, mergeErrors: true))
+        #expect(result.timedOut)
+        #expect(Date().timeIntervalSince(started) < 5)
+        let quick = try #require(CommandLineTools.launch("/bin/sleep", ["0"], timeout: 5, mergeErrors: true))
+        #expect(!quick.timedOut && quick.status == 0)
+    }
+
+    @Test func testLaunchDoesNotHangWhenChildHoldsPipe() throws {
+        let started = Date()
+        let result = try #require(CommandLineTools.launch(
+            "/bin/sh", ["-c", "echo hi; /bin/sleep 8 & exit 0"], timeout: 5, grace: 0.3, mergeErrors: true
+        ))
+        #expect(Date().timeIntervalSince(started) < 4)
+        #expect(!result.timedOut && result.status == 0)
+        #expect(String(decoding: result.data, as: UTF8.self).hasPrefix("hi"))
+    }
+
+    private func formula(_ name: String, _ deps: [String] = [], onRequest: Bool = false, kegCount: Int = 1) -> HomebrewFormula {
+        HomebrewFormula(name: name, version: "1", onRequest: onRequest, outdated: false, dependencies: deps,
+                        kegCount: kegCount, pinned: false)
+    }
+
+    @Test func testExclusiveDependencies() {
+        let all = [
+            formula("graphviz", ["gts", "librsvg"], onRequest: true),
+            formula("gts", ["netpbm"]), formula("netpbm"),
+            formula("librsvg"), formula("other", ["librsvg"], onRequest: true),
+            formula("kept"), formula("tool", ["kept2"], onRequest: true), formula("kept2", onRequest: true),
+        ]
+        #expect(Set(CommandLineToolParsers.exclusiveDependencies(of: "graphviz", in: all, protected: [])) == ["gts", "netpbm"])
+        #expect(CommandLineToolParsers.exclusiveDependencies(of: "tool", in: all, protected: []).isEmpty)
+    }
+
+    @Test func testExclusiveDependenciesKeepsCascadeOfSharedDependency() {
+        let all = [
+            formula("graphviz", ["A"], onRequest: true), formula("A", ["B"]), formula("B"),
+            formula("other", ["A"], onRequest: true),
+        ]
+        #expect(CommandLineToolParsers.exclusiveDependencies(of: "graphviz", in: all, protected: []).isEmpty)
+    }
+
+    @Test func testExclusiveDependenciesHandlesCycle() {
+        let all = [formula("tool", ["A"], onRequest: true), formula("A", ["B"]), formula("B", ["A", "tool"])]
+        #expect(CommandLineToolParsers.exclusiveDependencies(of: "tool", in: all, protected: []) == ["A", "B"])
+        let shared = all + [formula("other", ["B"], onRequest: true)]
+        #expect(CommandLineToolParsers.exclusiveDependencies(of: "tool", in: shared, protected: []).isEmpty)
+    }
+
+    @Test func testExclusiveDependenciesKeepsProtectedAndWhatTheyNeed() {
+        let all = [formula("tool", ["keep", "lib", "free"], onRequest: true), formula("keep", ["lib"]), formula("lib"), formula("free")]
+        #expect(CommandLineToolParsers.exclusiveDependencies(of: "tool", in: all, protected: ["keep"]) == ["free"])
+    }
+
+    @Test func testMultiKegToolTakesNoDependency() {
+        let all = [formula("tool", ["lib"], onRequest: true, kegCount: 2), formula("lib")]
+        #expect(CommandLineToolParsers.exclusiveDependencies(of: "tool", in: all, protected: []).isEmpty)
+    }
+
+    @Test func testTopLevelHidesDependencies() {
+        let all = [formula("a", ["b"], onRequest: true), formula("b", onRequest: true), formula("c")]
+        #expect(CommandLineToolParsers.topLevel(all).map(\.name) == ["a"])
+    }
+
+    @Test func testHomebrewParsing() throws {
+        let json = """
+        {"formulae":[
+          {"full_name":"user/tap/foo","outdated":true,"installed":[{"version":"1.2","installed_on_request":true,
+            "runtime_dependencies":[{"full_name":"bar"},{"full_name":"baz"}]}]},
+          {"full_name":"ghost","outdated":false,"installed":[]}
+        ],"casks":[{"token":"app","version":"3.0","outdated":true,"installed":"2.0"}]}
+        """
+        let parsed = try #require(CommandLineToolParsers.homebrew(Data(json.utf8)))
+        #expect(parsed.formulae == [HomebrewFormula(name: "user/tap/foo", version: "1.2", onRequest: true,
+                                                    outdated: true, dependencies: ["bar", "baz"],
+                                                    kegCount: 1, pinned: false)])
+        #expect(parsed.casks == [InstalledPackage(name: "app", version: "2.0", latest: "3.0")])
+        #expect(CommandLineToolParsers.homebrew(Data("pas du json".utf8)) == nil)
+    }
+
+    @Test func testHomebrewParsingSelectsLinkedKeg() throws {
+        let json = """
+        {"formulae":[
+          {"full_name":"lie","linked_keg":"2.0","pinned":true,"installed":[
+            {"version":"1.0","installed_on_request":false,"runtime_dependencies":[{"full_name":"old"},{"full_name":"both"}]},
+            {"version":"2.0","installed_on_request":true,"runtime_dependencies":[{"full_name":"both"}]},
+            {"version":"3.0","installed_on_request":false,"runtime_dependencies":[{"full_name":"new"}]}]},
+          {"full_name":"kegonly","linked_keg":null,"installed":[{"version":"1"},{"version":"2","installed_on_request":false}]},
+          {"full_name":"gone","linked_keg":"9","installed":[{"version":"1"},{"version":"2"}]}
+        ],"casks":[]}
+        """
+        let parsed = try #require(CommandLineToolParsers.homebrew(Data(json.utf8)))
+        let linked = parsed.formulae[0]
+        #expect(linked.version == "2.0" && linked.onRequest && linked.pinned && linked.kegCount == 3)
+        #expect(linked.dependencies == ["old", "both", "new"])
+        #expect(parsed.formulae[1].version == "2" && !parsed.formulae[1].onRequest && !parsed.formulae[1].pinned)
+        #expect(parsed.formulae[2].version == "2")
+    }
+
+    @Test func testMissingOnRequestCountsAsRequested() throws {
+        let json = #"{"formulae":[{"full_name":"x","installed":[{"version":"1"}]}],"casks":[]}"#
+        #expect(try #require(CommandLineToolParsers.homebrew(Data(json.utf8))).formulae.first?.onRequest == true)
+    }
+
+    @Test func testNpmParsing() throws {
+        let json = #"{"name":"lib","dependencies":{"@a/b":{"version":"1.0.0"},"c":{"version":"2.0.0"}}}"#
+        let packages = try #require(CommandLineToolParsers.npmPackages(Data(json.utf8)))
+        #expect(packages.contains(InstalledPackage(name: "@a/b", version: "1.0.0", latest: nil)))
+        #expect(packages.count == 2)
+        #expect(CommandLineToolParsers.npmPackages(Data("{}".utf8))?.isEmpty == true)
+        #expect(CommandLineToolParsers.npmPackages(Data("oops".utf8)) == nil)
+        #expect(CommandLineToolParsers.npmOutdated(Data(#"{"x":{"current":"1","latest":"2"}}"#.utf8)) == ["x": "2"])
+        #expect(CommandLineToolParsers.npmOutdated(Data("{}".utf8)) == [:])
+        #expect(CommandLineToolParsers.npmOutdated(Data("oops".utf8)) == nil)
+    }
+
+    @Test func testUvParsing() {
+        let text = """
+        graphifyy v0.9.95 [latest: 0.9.100]
+        - graphify
+        - graphify-mcp
+        specify-cli v1.2.3 [latest: 1.2.5]
+        - specify
+        """
+        #expect(CommandLineToolParsers.uvOutdated(text) == ["graphifyy": "0.9.100", "specify-cli": "1.2.5"])
+        let tools = CommandLineToolParsers.uvTools(text)
+        #expect(tools.map(\.name) == ["graphifyy", "specify-cli"])
+        #expect(tools.map(\.version) == ["0.9.95", "1.2.3"])
+        let withPaths = "graphifyy v0.9.95 (/Users/x/.local/share/uv/tools/graphifyy)\n- graphify (/Users/x/.local/bin/graphify)"
+        #expect(CommandLineToolParsers.uvTools(withPaths).map(\.version) == ["0.9.95"])
+        #expect(CommandLineToolParsers.uvTools("").isEmpty)
+        #expect(CommandLineToolParsers.uvOutdated("").isEmpty)
+    }
+
+    // MARK: Scanner d'outils en ligne de commande
+
+    private static let brewJSON = """
+    {"formulae":[
+     {"full_name":"ripgrep","outdated":false,"installed":[{"version":"14.1","installed_on_request":true,"runtime_dependencies":[{"full_name":"pcre2"}]}]},
+     {"full_name":"pcre2","outdated":false,"installed":[{"version":"10.4","installed_on_request":false,"runtime_dependencies":[]}]},
+     {"full_name":"arthur-ficial/tap/apfel-gui","outdated":false,"installed":[{"version":"1.0","installed_on_request":true,"runtime_dependencies":[]}]},
+     {"full_name":"node@24","outdated":false,"installed":[{"version":"24.1","installed_on_request":true,"runtime_dependencies":[]}]},
+     {"full_name":"python@3.14","outdated":false,"installed":[{"version":"3.14","installed_on_request":true,"runtime_dependencies":[]}]},
+     {"full_name":"openjdk@21","outdated":false,"installed":[{"version":"21","installed_on_request":true,"runtime_dependencies":[]}]},
+     {"full_name":"gh","outdated":false,"installed":[{"version":"2.0","installed_on_request":true,"runtime_dependencies":[]}]},
+     {"full_name":"rea-agents","outdated":false,"installed":[{"version":"1.0","installed_on_request":true,"runtime_dependencies":[]}]},
+     {"full_name":"uv","outdated":false,"installed":[{"version":"0.5","installed_on_request":true,"runtime_dependencies":[]}]}
+    ],"casks":[]}
+    """
+    private static let npmJSON = #"{"dependencies":{"npm":{"version":"10.0.0"},"corepack":{"version":"0.30.0"},"omniroute":{"version":"3.8.52"}}}"#
+    private static let npmOutdatedJSON = #"{"omniroute":{"current":"3.8.52","latest":"3.9.0"}}"#
+    private static let uvText = "graphifyy v0.9.95 (/x/graphifyy)\n- graphify (/x/bin/graphify)\n"
+    private static let uvOutdatedText = "graphifyy v0.9.95 [latest: 0.9.100]\n- graphify\n"
+
+    private func toolRunner(
+        npmOutdatedFails: Bool = false, uv: Bool = true, brewJSON: String = CoreTests.brewJSON, brewStatus: Int32 = 0,
+        npmJSON: String = CoreTests.npmJSON, uvText: String = CoreTests.uvText
+    ) -> CommandLineTools.Runner {
+        { source, arguments, _ in
+            func out(_ text: String, _ status: Int32 = 0) -> Docker.Output { Docker.Output(data: Data(text.utf8), status: status) }
+            switch (source, arguments.joined(separator: " ")) {
+            case (.brew, "info --json=v2 --installed"): return out(brewJSON, brewStatus)
+            case (.npm, "ls -g --depth=0 --json"): return out(npmJSON)
+            case (.npm, "outdated -g --json"): return npmOutdatedFails ? nil : Docker.Output(data: Data(CoreTests.npmOutdatedJSON.utf8), status: 1)
+            case (.uv, "tool list --show-paths"): return uv ? out(uvText) : nil
+            case (.uv, "tool list --outdated"): return uv ? out(CoreTests.uvOutdatedText) : nil
+            default: return nil
+            }
+        }
+    }
+
+    private func toolScan(_ run: @escaping CommandLineTools.Runner, exclusions: Exclusions = Exclusions()) throws -> ScanResult {
+        for folder in ["brew/Cellar/ripgrep", "brew/Cellar/pcre2", "brew/Cellar/apfel-gui"] {
+            try write("\(folder)/file.bin", bytes: 20_000)
+        }
+        let locations = CommandLineToolScanner.Locations(
+            homebrew: home.appendingPathComponent("brew"), npmRoot: home.appendingPathComponent("npm"),
+            uvTools: home.appendingPathComponent("uv")
+        )
+        return CommandLineToolScanner(environment: env, run: run, locations: locations, exclusions: exclusions).scan()
+    }
+
+    private func toolItem(_ result: ScanResult, _ category: String, _ label: String) -> ScanItem? {
+        result.categories.first { $0.id == category }?.items.first { $0.launchLabel == label }
+    }
+
+    @Test func testToolScanListsTopLevelOnly() throws {
+        let result = try toolScan(toolRunner())
+        #expect(result.categories.map(\.id) == ["cli.brew", "cli.npm", "cli.uv"])
+        #expect(result.categories.map(\.title) == ["Homebrew", "npm", "uv"])
+        #expect(toolItem(result, "cli.brew", "brew:pcre2") == nil)
+        let ripgrep = try #require(toolItem(result, "cli.brew", "brew:ripgrep"))
+        #expect(ripgrep.removalArguments == ["pcre2"])
+        #expect(ripgrep.size > 2 * 8192)
+        #expect(ripgrep.size == FileSystem.allocatedSize(of: home.appendingPathComponent("brew/Cellar/ripgrep"))
+            + FileSystem.allocatedSize(of: home.appendingPathComponent("brew/Cellar/pcre2")))
+        #expect(ripgrep.detail.contains("14.1") && ripgrep.detail.contains("emporte 1 dépendance"))
+        #expect(!ripgrep.selectedByDefault)
+        #expect(ripgrep.removal == .commandLineTool)
+        #expect(ripgrep.reinstallCommand == "brew install ripgrep")
+    }
+
+    @Test func testToolScanResolvesTapFolder() throws {
+        let result = try toolScan(toolRunner())
+        let item = try #require(toolItem(result, "cli.brew", "brew:arthur-ficial/tap/apfel-gui"))
+        #expect(item.url == home.appendingPathComponent("brew/Cellar/apfel-gui"))
+        #expect(item.size > 0)
+        let missing = try #require(toolItem(result, "cli.brew", "brew:gh"))
+        #expect(missing.size == 0)
+    }
+
+    @Test func testToolScanLocksCorePackages() throws {
+        let result = try toolScan(toolRunner())
+        #expect(try #require(toolItem(result, "cli.npm", "npm:npm")).locked)
+        #expect(try #require(toolItem(result, "cli.npm", "npm:corepack")).locked)
+        #expect(try !#require(toolItem(result, "cli.npm", "npm:omniroute")).locked)
+        #expect(try #require(toolItem(result, "cli.brew", "brew:uv")).locked)
+    }
+
+    @Test func testToolScanWarnsForRuntimes() throws {
+        let result = try toolScan(toolRunner())
+        let node = try #require(toolItem(result, "cli.brew", "brew:node@24"))
+        #expect(node.warning?.contains("omniroute") == true)
+        #expect(node.warning?.contains("corepack") == false)
+        #expect(!node.detail.contains("Attention"))
+        for label in ["brew:python@3.14", "brew:openjdk@21", "brew:gh", "brew:rea-agents"] {
+            let item = try #require(toolItem(result, "cli.brew", label))
+            #expect(item.warning?.contains("Attention") == true)
+            #expect(!item.detail.contains("Attention"))
+        }
+        #expect(try #require(toolItem(result, "cli.brew", "brew:ripgrep")).warning == nil)
+        #expect(try #require(toolItem(result, "cli.npm", "npm:npm")).warning?.contains("Node") == true)
+    }
+
+    @Test func testToolScanWarnsForAllSources() throws {
+        let npm = #"{"dependencies":{"rea-agents":{"version":"6.8.0"},"@scope/rea-agents":{"version":"1.0.0"},"omniroute":{"version":"1.0.0"}}}"#
+        let brew = #"{"formulae":[],"casks":[{"token":"gh","version":"1","outdated":false,"installed":"1"}]}"#
+        let result = try toolScan(toolRunner(brewJSON: brew, npmJSON: npm, uvText: "rea-agents v1.0.0 (/x)\ngraphifyy v1.0.0 (/y)\n"))
+        #expect(try #require(toolItem(result, "cli.npm", "npm:rea-agents")).warning?.contains("REA") == true)
+        #expect(try #require(toolItem(result, "cli.npm", "npm:@scope/rea-agents")).warning?.contains("REA") == true)
+        #expect(try #require(toolItem(result, "cli.npm", "npm:omniroute")).warning == nil)
+        #expect(try #require(toolItem(result, "cli.uv", "uv:rea-agents")).warning?.contains("REA") == true)
+        #expect(try #require(toolItem(result, "cli.uv", "uv:graphifyy")).warning == nil)
+        #expect(try #require(toolItem(result, "cli.brew", "cask:gh")).warning != nil)
+    }
+
+    private func keg(_ name: String, onRequest: Bool = false, deps: [String] = [], extra: String = "") -> String {
+        let list = deps.map { #"{"full_name":"\#($0)"}"# }.joined(separator: ",")
+        return #"{"full_name":"\#(name)"\#(extra),"installed":[{"version":"1","installed_on_request":\#(onRequest),"runtime_dependencies":[\#(list)]}]}"#
+    }
+
+    private func brewList(_ formulae: [String]) -> String {
+        #"{"formulae":[\#(formulae.joined(separator: ","))],"casks":[]}"#
+    }
+
+    @Test func testProtectedDependenciesStayInstalled() throws {
+        let names = ["uv", "node@24", "python@3.14", "openjdk@21", "gh", "rea-agents", "plain"]
+        let json = brewList([keg("tool", onRequest: true, deps: names)] + names.map { keg($0) })
+        let item = try #require(toolItem(try toolScan(toolRunner(brewJSON: json)), "cli.brew", "brew:tool"))
+        #expect(item.removalArguments == ["plain"])
+    }
+
+    @Test func testDependencyOfProtectedFormulaStays() throws {
+        let json = brewList([
+            keg("tool", onRequest: true, deps: ["python@3.14", "libffi", "plain"]),
+            keg("python@3.14", deps: ["libffi"]), keg("libffi"), keg("plain"),
+        ])
+        let item = try #require(toolItem(try toolScan(toolRunner(brewJSON: json)), "cli.brew", "brew:tool"))
+        #expect(item.removalArguments == ["plain"])
+    }
+
+    @Test func testPinnedAndMultiKegDependenciesStay() throws {
+        let multi = #"{"full_name":"multi","linked_keg":"2","installed":[{"version":"1","installed_on_request":false},{"version":"2","installed_on_request":false}]}"#
+        let json = brewList([
+            keg("tool", onRequest: true, deps: ["pinned-lib", "multi", "plain"]),
+            keg("pinned-lib", extra: #","pinned":true"#), multi, keg("plain"),
+        ])
+        let item = try #require(toolItem(try toolScan(toolRunner(brewJSON: json)), "cli.brew", "brew:tool"))
+        #expect(item.removalArguments == ["plain"])
+    }
+
+    @Test func testExcludedDependencyStaysAndItsNeedsToo() throws {
+        let json = brewList([
+            keg("tool", onRequest: true, deps: ["libfoo", "libbar", "plain"]),
+            keg("libfoo", deps: ["libbar"]), keg("libbar"), keg("plain"),
+        ])
+        var exclusions = Exclusions()
+        exclusions.add(home.appendingPathComponent("brew/Cellar/libfoo"))
+        let item = try #require(toolItem(try toolScan(toolRunner(brewJSON: json), exclusions: exclusions), "cli.brew", "brew:tool"))
+        #expect(item.removalArguments == ["plain"])
+        #expect(item.dependencyPaths == [home.appendingPathComponent("brew/Cellar/plain")])
+    }
+
+    @Test func testMultiKegToolCountsOnlySelectedKeg() throws {
+        try write("brew/Cellar/multi/1/old.bin", bytes: 400_000)
+        try write("brew/Cellar/multi/2/new.bin", bytes: 20_000)
+        try write("brew/Cellar/lib/1/f.bin", bytes: 400_000)
+        let multi = #"{"full_name":"multi","linked_keg":"2","installed":[{"version":"1","installed_on_request":true,"runtime_dependencies":[{"full_name":"lib"}]},{"version":"2","installed_on_request":true,"runtime_dependencies":[{"full_name":"lib"}]}]}"#
+        let item = try #require(toolItem(try toolScan(toolRunner(brewJSON: brewList([multi, keg("lib")]))), "cli.brew", "brew:multi"))
+        #expect(item.size == FileSystem.allocatedSize(of: home.appendingPathComponent("brew/Cellar/multi/2")))
+        #expect(item.detail.contains("les anciennes versions restent installées"))
+        #expect(item.removalArguments.isEmpty && item.dependencyPaths.isEmpty)
+        #expect(!item.locked)
+    }
+
+    @Test func testPinnedToolIsLocked() throws {
+        let json = brewList([keg("tool", onRequest: true, extra: #","pinned":true"#)])
+        let item = try #require(toolItem(try toolScan(toolRunner(brewJSON: json)), "cli.brew", "brew:tool"))
+        #expect(item.locked)
+        #expect(item.detail.contains("épinglée"))
+    }
+
+    @Test func testBrewFailureHidesCategory() throws {
+        let result = try toolScan(toolRunner(brewStatus: 1))
+        #expect(!result.categories.map(\.id).contains("cli.brew"))
+    }
+
+    @Test func testReinstallCommandOmitsUnsafeVersion() throws {
+        let npm = #"{"dependencies":{"a":{"version":"1.0.0; rm -rf ~"},"b":{"version":"1.0.0+build"}}}"#
+        let result = try toolScan(toolRunner(npmJSON: npm, uvText: "x v1;2 (/x)\n"))
+        #expect(try #require(toolItem(result, "cli.npm", "npm:a")).reinstallCommand == "npm install -g a")
+        #expect(try #require(toolItem(result, "cli.npm", "npm:b")).reinstallCommand == "npm install -g b@1.0.0+build")
+        #expect(try #require(toolItem(result, "cli.uv", "uv:x")).reinstallCommand == "uv tool install x")
+        #expect(CommandLineToolScanner.safeVersion("1.0\n") == nil)
+    }
+
+    @Test func testBulkSelectionSkipsLockedAndWarned() {
+        let category = ScanCategory(id: "c", title: "C", items: [
+            ScanItem(url: home.appendingPathComponent("plain"), size: 1),
+            ScanItem(url: home.appendingPathComponent("warned"), size: 1, warning: "Attention : x"),
+            ScanItem(url: home.appendingPathComponent("locked"), size: 1, locked: true),
+        ])
+        #expect(category.bulkSelectableItems.map(\.name) == ["plain"])
+    }
+
+    @Test func testToolScanShowsUpdates() throws {
+        let result = try toolScan(toolRunner())
+        let uv = try #require(toolItem(result, "cli.uv", "uv:graphifyy"))
+        #expect(uv.detail.contains("0.9.100"))
+        #expect(uv.reinstallCommand == "uv tool install graphifyy==0.9.95")
+        let npm = try #require(toolItem(result, "cli.npm", "npm:omniroute"))
+        #expect(npm.detail.contains("3.9.0"))
+        #expect(npm.reinstallCommand == "npm install -g omniroute@3.8.52")
+    }
+
+    @Test func testToolScanKeepsListWhenOutdatedFails() throws {
+        let result = try toolScan(toolRunner(npmOutdatedFails: true))
+        let npm = try #require(toolItem(result, "cli.npm", "npm:omniroute"))
+        #expect(!npm.detail.contains("mise à jour"))
+    }
+
+    @Test func testToolScanAcceptsNpmOutdatedStatusOne() throws {
+        let result = try toolScan(toolRunner())
+        #expect(try #require(toolItem(result, "cli.npm", "npm:omniroute")).detail.contains("mise à jour 3.9.0"))
+    }
+
+    @Test func testToolScanSkipsMissingSources() throws {
+        let result = try toolScan(toolRunner(uv: false))
+        #expect(result.categories.map(\.id) == ["cli.brew", "cli.npm"])
     }
 }
 

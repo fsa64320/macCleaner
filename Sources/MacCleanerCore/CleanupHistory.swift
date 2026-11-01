@@ -11,6 +11,8 @@ public struct HistoryEntry: Codable, Identifiable, Sendable {
     public let failureCount: Int
     public let cancelledCount: Int
     public let paths: [String]
+    /// Commandes pour réinstaller les outils retirés ; absent des anciennes lignes.
+    public var reinstallCommands: [String]?
 }
 
 /// Un objet JSON par ligne : une ligne abîmée n'emporte pas le reste de l'historique.

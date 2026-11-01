@@ -6,6 +6,7 @@ public protocol FileRemoving: Sendable {
     func unloadLaunchAgent(label: String) throws
     func evictLocalCopy(_ url: URL) throws
     func removeDockerImage(_ identifier: String) throws
+    func uninstallCommandLineTool(_ identifier: String, arguments: [String]) throws
 }
 
 public struct SystemFileRemover: FileRemoving {
@@ -27,6 +28,10 @@ public struct SystemFileRemover: FileRemoving {
 
     public func removeDockerImage(_ identifier: String) throws {
         try Docker.removeImage(identifier)
+    }
+
+    public func uninstallCommandLineTool(_ identifier: String, arguments: [String]) throws {
+        try CommandLineTools.uninstall(identifier: identifier, arguments: arguments)
     }
 
     public func unloadLaunchAgent(label: String) throws {
@@ -57,7 +62,7 @@ public struct CleanupReport: Sendable {
 
     public var trashedSize: Int64 { removed.filter { $0.removal == .moveToTrash || $0.removal == .launchAgent }.reduce(0) { $0 + $1.size } }
     public var evictedSize: Int64 { removed.filter { $0.removal == .evictLocalCopy }.reduce(0) { $0 + $1.size } }
-    public var permanentSize: Int64 { removed.filter { $0.removal == .permanent || $0.removal == .dockerImage }.reduce(0) { $0 + $1.size } }
+    public var permanentSize: Int64 { removed.filter { $0.removal == .permanent || $0.removal == .dockerImage || $0.removal == .commandLineTool }.reduce(0) { $0 + $1.size } }
 }
 
 public struct CleanupRunner: Sendable {
@@ -89,9 +94,9 @@ public struct CleanupRunner: Sendable {
                 break
             }
             ScanProgress.current?.update(item.name, fraction: Double(index) / Double(items.count))
-            guard !item.locked, !([item.url] + item.companions).contains(where: exclusions.covers) else { report.skipped.append(item); continue }
-            if item.removal == .dockerImage {
-                remove(dockerImage: item, into: &report)
+            guard !item.locked, !([item.url] + item.companions + item.dependencyPaths).contains(where: exclusions.covers) else { report.skipped.append(item); continue }
+            if item.removal == .dockerImage || item.removal == .commandLineTool {
+                remove(byCommand: item, into: &report)
                 continue
             }
             // Un parent déjà retiré emporte ses enfants sélectionnés.
@@ -106,7 +111,7 @@ public struct CleanupRunner: Sendable {
                     try remover.deletePermanently(item.url)
                 case .evictLocalCopy:
                     try remover.evictLocalCopy(item.url)
-                case .dockerImage:
+                case .dockerImage, .commandLineTool:
                     break
                 case .launchAgent:
                     if let label = item.launchLabel { try remover.unloadLaunchAgent(label: label) }
@@ -123,9 +128,14 @@ public struct CleanupRunner: Sendable {
         return report
     }
 
-    private func remove(dockerImage item: ScanItem, into report: inout CleanupReport) {
+    /// Docker et les outils en ligne de commande partent par une commande, sans passer par un fichier.
+    private func remove(byCommand item: ScanItem, into report: inout CleanupReport) {
         do {
-            try remover.removeDockerImage(item.launchLabel ?? "")
+            if item.removal == .commandLineTool {
+                try remover.uninstallCommandLineTool(item.launchLabel ?? "", arguments: item.removalArguments)
+            } else {
+                try remover.removeDockerImage(item.launchLabel ?? "")
+            }
             report.removed.append(item)
         } catch {
             report.failures.append(CleanupFailure(item: item, reason: error.localizedDescription))
@@ -134,20 +144,28 @@ public struct CleanupRunner: Sendable {
 
     private func recordHistory(_ report: CleanupReport) {
         guard let history, !report.removed.isEmpty || !report.failures.isEmpty else { return }
+        let reinstall = report.removed.compactMap(\.reinstallCommand)
         try? history.append(HistoryEntry(
             date: Date(), module: module, removedCount: report.removed.count,
             trashedBytes: report.trashedSize, permanentBytes: report.permanentSize,
             evictedBytes: report.evictedSize,
             failureCount: report.failures.count, cancelledCount: report.cancelledCount,
-            paths: report.removed.map(\.url.path)
+            paths: report.removed.flatMap { [$0.url.path] + $0.dependencyPaths.map(\.path) },
+            reinstallCommands: reinstall.isEmpty ? nil : reinstall
         ))
     }
 
     private func writeLog(_ report: CleanupReport) {
         guard let logURL else { return }
         let stamp = ISO8601DateFormatter().string(from: Date())
-        var lines = report.removed.map { "\(stamp) OK \($0.removal.rawValue) \($0.url.path)" }
-        lines += report.failures.map { "\(stamp) ECHEC \($0.item.url.path) : \($0.reason)" }
+        var lines = report.removed.flatMap { item in
+            ["\(stamp) OK \(item.removal.rawValue) \(item.url.path)"]
+                + item.dependencyPaths.map { "\(stamp) OK \(item.removal.rawValue) \($0.path) (dépendance de \(item.name))" }
+        }
+        // Une raison sur plusieurs lignes imiterait d'autres entrées du journal.
+        lines += report.failures.map {
+            "\(stamp) ECHEC \($0.item.url.path) : \($0.reason.components(separatedBy: .newlines).filter { !$0.isEmpty }.joined(separator: " "))"
+        }
         guard !lines.isEmpty else { return }
         try? FileSystem.append(Data((lines.joined(separator: "\n") + "\n").utf8), to: logURL)
     }

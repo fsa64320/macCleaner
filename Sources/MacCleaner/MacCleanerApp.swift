@@ -29,7 +29,7 @@ struct RootView: View {
 
     private let sections: [(String, [Module])] = [
         ("", [.dashboard, .smartCare]),
-        ("Nettoyer", [.cleanup, .clutter, .devTools, .spaceLens, .privacy, .cloud]),
+        ("Nettoyer", [.cleanup, .clutter, .devTools, .cliTools, .spaceLens, .privacy, .cloud]),
         ("Applications", [.uninstaller, .leftovers, .updates]),
         ("Système", [.performance, .maintenance]),
         ("macCleaner", [.monitoring, .history, .exclusions]),
