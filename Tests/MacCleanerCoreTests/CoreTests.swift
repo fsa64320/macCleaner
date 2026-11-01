@@ -784,6 +784,35 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
             try CommandLineTools.uninstall(identifier: "brew:graphviz", arguments: ["--ignore-dependencies"])
         }
     }
+
+    @Test func testFailureMessageReportsTimeoutAndEmptyOutput() {
+        let timeout = CommandLineTools.failureMessage(.init(data: Data(), status: 15, timedOut: true))
+        #expect(timeout?.contains("incomplet") == true)
+        let silent = CommandLineTools.failureMessage(.init(data: Data(), status: 3, timedOut: false))
+        #expect(silent?.contains("3") == true)
+        let printed = CommandLineTools.failureMessage(.init(data: Data("boom".utf8), status: 1, timedOut: false))
+        #expect(printed == "boom")
+        #expect(CommandLineTools.failureMessage(.init(data: Data(), status: 0, timedOut: false)) == nil)
+    }
+
+    @Test func testLaunchReportsTimeoutAndStopsProcess() throws {
+        let started = Date()
+        let result = try #require(CommandLineTools.launch("/bin/sleep", ["30"], timeout: 0.3, grace: 0.3, mergeErrors: true))
+        #expect(result.timedOut)
+        #expect(Date().timeIntervalSince(started) < 5)
+        let quick = try #require(CommandLineTools.launch("/bin/sleep", ["0"], timeout: 5, mergeErrors: true))
+        #expect(!quick.timedOut && quick.status == 0)
+    }
+
+    @Test func testLaunchDoesNotHangWhenChildHoldsPipe() throws {
+        let started = Date()
+        let result = try #require(CommandLineTools.launch(
+            "/bin/sh", ["-c", "echo hi; /bin/sleep 8 & exit 0"], timeout: 5, grace: 0.3, mergeErrors: true
+        ))
+        #expect(Date().timeIntervalSince(started) < 4)
+        #expect(!result.timedOut && result.status == 0)
+        #expect(String(decoding: result.data, as: UTF8.self).hasPrefix("hi"))
+    }
 }
 
 private extension URL {
