@@ -21,6 +21,13 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
     func evictLocalCopy(_ url: URL) throws { evicted.append(url) }
     var dockerImages: [String] = []
     func removeDockerImage(_ identifier: String) throws { dockerImages.append(identifier) }
+    var tools: [(identifier: String, arguments: [String])] = []
+    var failingTools: Set<String> = []
+    struct ToolFailure: LocalizedError { var errorDescription: String? { "échec simulé" } }
+    func uninstallCommandLineTool(_ identifier: String, arguments: [String]) throws {
+        if failingTools.contains(identifier) { throw ToolFailure() }
+        tools.append((identifier, arguments))
+    }
     func deletePermanently(_ url: URL) throws { deleted.append(url) }
     func unloadLaunchAgent(label: String) throws { unloaded.append(label) }
 }
@@ -568,6 +575,63 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
         let report = CleanupRunner(remover: remover, environment: env).run([item])
         #expect(remover.dockerImages == [identifier])
         #expect(report.permanentSize == 9)
+    }
+
+    @Test func testRunnerUninstallsCommandLineTool() throws {
+        let url = home.appendingPathComponent("Cellar/ripgrep")
+        let item = ScanItem(url: url, size: 10, removal: .commandLineTool, launchLabel: "brew:ripgrep",
+                            removalArguments: ["pcre2"], reinstallCommand: "brew install ripgrep")
+        let remover = RecordingRemover()
+        let report = CleanupRunner(remover: remover, environment: env).run([item])
+        #expect(remover.tools.map(\.identifier) == ["brew:ripgrep"])
+        #expect(remover.tools.first?.arguments == ["pcre2"])
+        #expect(report.permanentSize == 10)
+    }
+
+    @Test func testRunnerSkipsExcludedAndLockedTools() throws {
+        let excludedURL = home.appendingPathComponent("Cellar/excluded")
+        var exclusions = Exclusions()
+        exclusions.add(excludedURL)
+        let remover = RecordingRemover()
+        let report = CleanupRunner(remover: remover, environment: env, exclusions: exclusions).run([
+            ScanItem(url: excludedURL, size: 1, removal: .commandLineTool, launchLabel: "brew:excluded"),
+            ScanItem(url: home.appendingPathComponent("Cellar/locked"), size: 1, removal: .commandLineTool, launchLabel: "brew:locked", locked: true),
+        ])
+        #expect(report.skipped.count == 2)
+        #expect(remover.tools.isEmpty)
+    }
+
+    @Test func testRunnerContinuesAfterToolFailure() throws {
+        let broken = home.appendingPathComponent("Cellar/broken")
+        let fine = home.appendingPathComponent("Cellar/fine")
+        let remover = RecordingRemover()
+        remover.failingTools = ["brew:broken"]
+        let report = CleanupRunner(remover: remover, environment: env).run([
+            ScanItem(url: broken, size: 1, removal: .commandLineTool, launchLabel: "brew:broken"),
+            ScanItem(url: fine, size: 2, removal: .commandLineTool, launchLabel: "brew:fine"),
+        ])
+        #expect(report.failures.count == 1)
+        #expect(report.removed.count == 1)
+        #expect(remover.tools.map(\.identifier) == ["brew:fine"])
+        #expect(!FileManager.default.fileExists(atPath: fine.path))
+    }
+
+    @Test func testHistoryKeepsReinstallCommands() throws {
+        let history = CleanupHistory(fileURL: home.appendingPathComponent("history.jsonl"))
+        let item = ScanItem(url: home.appendingPathComponent("Cellar/ripgrep"), size: 10, removal: .commandLineTool,
+                            launchLabel: "brew:ripgrep", reinstallCommand: "brew install ripgrep")
+        _ = CleanupRunner(remover: RecordingRemover(), environment: env, history: history, module: "Test").run([item])
+        #expect(history.load().entries.first?.reinstallCommands == ["brew install ripgrep"])
+    }
+
+    @Test func testHistoryReadsOldLines() throws {
+        let url = home.appendingPathComponent("history.jsonl")
+        let line = #"{"date":"2026-01-01T00:00:00Z","module":"A","removedCount":1,"trashedBytes":1,"permanentBytes":0,"failureCount":0,"cancelledCount":0,"paths":[]}"#
+        try Data((line + "\n").utf8).write(to: url)
+        let loaded = CleanupHistory(fileURL: url).load()
+        #expect(loaded.entries.count == 1)
+        #expect(loaded.entries.first?.reinstallCommands == nil)
+        #expect(loaded.unreadableLines == 0)
     }
 
     @Test func testDockerRejectsUnsafeIdentifiers() {

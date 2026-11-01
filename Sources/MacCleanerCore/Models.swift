@@ -8,6 +8,8 @@ public enum Removal: String, Sendable {
     case evictLocalCopy
     /// Image Docker, identifiée par `launchLabel`. Suppression définitive.
     case dockerImage
+    /// Outil en ligne de commande, identifié par `launchLabel`. Retiré par sa commande, pas par fichier.
+    case commandLineTool
 }
 
 public struct ScanItem: Identifiable, Hashable, Sendable {
@@ -22,11 +24,16 @@ public struct ScanItem: Identifiable, Hashable, Sendable {
     public let locked: Bool
     /// Fichiers qui partent avec l'élément, comme les blobs d'un modèle Ollama.
     public let companions: [URL]
+    /// Arguments passés à la commande de retrait d'un outil en ligne de commande.
+    public let removalArguments: [String]
+    /// Commande qui réinstalle l'outil, gardée dans l'historique.
+    public let reinstallCommand: String?
 
     public init(
         url: URL, name: String? = nil, detail: String = "", size: Int64,
         selectedByDefault: Bool = false, removal: Removal = .moveToTrash,
-        launchLabel: String? = nil, locked: Bool = false, companions: [URL] = []
+        launchLabel: String? = nil, locked: Bool = false, companions: [URL] = [],
+        removalArguments: [String] = [], reinstallCommand: String? = nil
     ) {
         self.url = url
         self.name = name ?? url.lastPathComponent
@@ -37,6 +44,8 @@ public struct ScanItem: Identifiable, Hashable, Sendable {
         self.launchLabel = launchLabel
         self.locked = locked
         self.companions = companions
+        self.removalArguments = removalArguments
+        self.reinstallCommand = reinstallCommand
     }
 }
 
