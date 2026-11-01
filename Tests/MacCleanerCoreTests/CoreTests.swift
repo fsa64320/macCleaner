@@ -813,6 +813,71 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
         #expect(!result.timedOut && result.status == 0)
         #expect(String(decoding: result.data, as: UTF8.self).hasPrefix("hi"))
     }
+
+    private func formula(_ name: String, _ deps: [String] = [], onRequest: Bool = false) -> HomebrewFormula {
+        HomebrewFormula(name: name, version: "1", onRequest: onRequest, outdated: false, dependencies: deps)
+    }
+
+    @Test func testExclusiveDependencies() {
+        let all = [
+            formula("graphviz", ["gts", "librsvg"], onRequest: true),
+            formula("gts", ["netpbm"]), formula("netpbm"),
+            formula("librsvg"), formula("other", ["librsvg"], onRequest: true),
+            formula("kept"), formula("tool", ["kept2"], onRequest: true), formula("kept2", onRequest: true),
+        ]
+        #expect(Set(CommandLineToolParsers.exclusiveDependencies(of: "graphviz", in: all)) == ["gts", "netpbm"])
+        #expect(CommandLineToolParsers.exclusiveDependencies(of: "tool", in: all).isEmpty)
+    }
+
+    @Test func testTopLevelHidesDependencies() {
+        let all = [formula("a", ["b"], onRequest: true), formula("b", onRequest: true), formula("c")]
+        #expect(CommandLineToolParsers.topLevel(all).map(\.name) == ["a"])
+    }
+
+    @Test func testHomebrewParsing() throws {
+        let json = """
+        {"formulae":[
+          {"full_name":"user/tap/foo","outdated":true,"installed":[{"version":"1.2","installed_on_request":true,
+            "runtime_dependencies":[{"full_name":"bar"},{"full_name":"baz"}]}]},
+          {"full_name":"ghost","outdated":false,"installed":[]}
+        ],"casks":[{"token":"app","version":"3.0","outdated":true,"installed":"2.0"}]}
+        """
+        let parsed = try #require(CommandLineToolParsers.homebrew(Data(json.utf8)))
+        #expect(parsed.formulae == [HomebrewFormula(name: "user/tap/foo", version: "1.2", onRequest: true,
+                                                    outdated: true, dependencies: ["bar", "baz"])])
+        #expect(parsed.casks == [InstalledPackage(name: "app", version: "2.0", latest: "3.0")])
+        #expect(CommandLineToolParsers.homebrew(Data("pas du json".utf8)) == nil)
+    }
+
+    @Test func testNpmParsing() throws {
+        let json = #"{"name":"lib","dependencies":{"@a/b":{"version":"1.0.0"},"c":{"version":"2.0.0"}}}"#
+        let packages = try #require(CommandLineToolParsers.npmPackages(Data(json.utf8)))
+        #expect(packages.contains(InstalledPackage(name: "@a/b", version: "1.0.0", latest: nil)))
+        #expect(packages.count == 2)
+        #expect(CommandLineToolParsers.npmPackages(Data("{}".utf8))?.isEmpty == true)
+        #expect(CommandLineToolParsers.npmPackages(Data("oops".utf8)) == nil)
+        #expect(CommandLineToolParsers.npmOutdated(Data(#"{"x":{"current":"1","latest":"2"}}"#.utf8)) == ["x": "2"])
+        #expect(CommandLineToolParsers.npmOutdated(Data("{}".utf8)) == [:])
+        #expect(CommandLineToolParsers.npmOutdated(Data("oops".utf8)) == nil)
+    }
+
+    @Test func testUvParsing() {
+        let text = """
+        graphifyy v0.9.95 [latest: 0.9.100]
+        - graphify
+        - graphify-mcp
+        specify-cli v1.2.3 [latest: 1.2.5]
+        - specify
+        """
+        #expect(CommandLineToolParsers.uvOutdated(text) == ["graphifyy": "0.9.100", "specify-cli": "1.2.5"])
+        let tools = CommandLineToolParsers.uvTools(text)
+        #expect(tools.map(\.name) == ["graphifyy", "specify-cli"])
+        #expect(tools.map(\.version) == ["0.9.95", "1.2.3"])
+        let withPaths = "graphifyy v0.9.95 (/Users/x/.local/share/uv/tools/graphifyy)\n- graphify (/Users/x/.local/bin/graphify)"
+        #expect(CommandLineToolParsers.uvTools(withPaths).map(\.version) == ["0.9.95"])
+        #expect(CommandLineToolParsers.uvTools("").isEmpty)
+        #expect(CommandLineToolParsers.uvOutdated("").isEmpty)
+    }
 }
 
 private extension URL {
