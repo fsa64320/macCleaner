@@ -19,6 +19,8 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
     func moveToTrash(_ url: URL) throws -> URL? { trashed.append(url); return nil }
     var evicted: [URL] = []
     func evictLocalCopy(_ url: URL) throws { evicted.append(url) }
+    var dockerImages: [String] = []
+    func removeDockerImage(_ identifier: String) throws { dockerImages.append(identifier) }
     func deletePermanently(_ url: URL) throws { deleted.append(url) }
     func unloadLaunchAgent(label: String) throws { unloaded.append(label) }
 }
@@ -474,6 +476,105 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
         #expect(remover.trashed.isEmpty)
         #expect(report.evictedSize == 9)
         #expect(report.trashedSize == 0)
+    }
+
+    // MARK: Outils de développement
+
+    private func age(_ path: String, days: Double) throws {
+        let date = Date().addingTimeInterval(-days * 86_400)
+        try FileManager.default.setAttributes([.modificationDate: date], ofItemAtPath: home.appendingPathComponent(path).path)
+    }
+
+    private func noDocker() -> DevToolsScanner {
+        DevToolsScanner(environment: env, docker: { _ in nil })
+    }
+
+    @Test func testDevToolsFindsOnlyStaleProjectsWithManifest() throws {
+        try write("code/old/package.json")
+        try write("code/old/node_modules/dep/index.js", bytes: 40000)
+        try write("code/old/node_modules/dep/node_modules/nested/x.js")
+        try age("code/old/package.json", days: 90)
+        try write("code/fresh/package.json")
+        try write("code/fresh/node_modules/dep/index.js")
+        try write("code/nomanifest/target/file")
+        try age("code/nomanifest/target", days: 90)
+        try write("code/rust/Cargo.toml")
+        try write("code/rust/target/debug/app")
+        try age("code/rust/Cargo.toml", days: 200)
+        try write("Library/app/node_modules/x/y.js")
+        let category = try #require(noDocker().scan().categories.first { $0.id == "dev-projects" })
+        #expect(Set(category.items.map(\.name)) == ["old/node_modules", "rust/target"])
+        #expect(category.items.allSatisfy { !$0.selectedByDefault && $0.removal == .moveToTrash })
+    }
+
+    @Test func testGitActivityDoesNotKeepProjectFresh() throws {
+        try write("code/old/package.json")
+        try write("code/old/node_modules/x.js")
+        try write("code/old/.git/FETCH_HEAD")
+        try age("code/old/package.json", days: 90)
+        let items = noDocker().scan().categories.flatMap(\.items)
+        #expect(items.map(\.name) == ["old/node_modules"])
+    }
+
+    @Test func testPackageCachesPreselectOnlySafeOnes() throws {
+        try write("Library/Caches/Homebrew/downloads/x")
+        try write(".gradle/caches/modules/y")
+        let items = noDocker().scan().categories.flatMap(\.items)
+        #expect(items.first { $0.name == "Homebrew" }?.selectedByDefault == true)
+        #expect(items.first { $0.name == "Gradle" }?.selectedByDefault == false)
+        #expect(throws: Never.self) { try SafetyPolicy(environment: env).validate(try #require(items.first).url, removal: .moveToTrash) }
+    }
+
+    @Test func testDockerListsOnlyUnusedImages() throws {
+        let unused = "sha256:" + String(repeating: "a", count: 64)
+        let used = "sha256:" + String(repeating: "b", count: 64)
+        let unknown = "sha256:" + String(repeating: "c", count: 64)
+        let json = """
+        {"Images":[
+        {"ID":"\(unused)","Repository":"redis","Tag":"7","Size":"1.5GB","Containers":"0","CreatedSince":"2 months ago"},
+        {"ID":"\(used)","Repository":"nginx","Tag":"1","Size":"100MB","Containers":"2"},
+        {"ID":"\(unknown)","Repository":"x","Tag":"1","Size":"1MB","Containers":"N/A"},
+        {"ID":"../../etc","Repository":"y","Tag":"1","Size":"1MB","Containers":"0"}
+        ]}
+        """
+        let scanner = DevToolsScanner(environment: env, docker: { _ in Docker.Output(data: Data(json.utf8), status: 0) })
+        let items = try #require(scanner.scan().categories.first { $0.id == "dev-docker" }).items
+        #expect(items.map(\.name) == ["redis:7"])
+        #expect(items.first?.size == 1_500_000_000)
+        #expect(items.first?.selectedByDefault == false)
+    }
+
+    @Test func testDockerStoppedIsReportedNotSelectable() throws {
+        let scanner = DevToolsScanner(environment: env, docker: { _ in Docker.Output(data: Data(), status: 1) })
+        let item = try #require(scanner.scan().categories.first { $0.id == "dev-docker" }?.items.first)
+        #expect(item.locked)
+    }
+
+    @Test func testRunnerRemovesDockerImageAsPermanent() throws {
+        let remover = RecordingRemover()
+        let identifier = String(repeating: "a", count: 12)
+        let item = ScanItem(url: URL(fileURLWithPath: "/docker/images/\(identifier)"), size: 9, removal: .dockerImage, launchLabel: identifier)
+        let report = CleanupRunner(remover: remover, environment: env).run([item])
+        #expect(remover.dockerImages == [identifier])
+        #expect(report.permanentSize == 9)
+    }
+
+    @Test func testDockerRejectsUnsafeIdentifiers() {
+        #expect(Docker.isValid(identifier: "abcdef123456"))
+        #expect(!Docker.isValid(identifier: "--force"))
+        #expect(!Docker.isValid(identifier: "redis:7"))
+        #expect(throws: (any Error).self) { try Docker.removeImage("--all") }
+        #expect(Docker.parseSize("512kB") == 512_000)
+    }
+
+    @Test func testSystemAndUnreadableCachesAreNotOffered() throws {
+        try write("Library/Caches/familycircled/data")
+        try write("Library/Caches/org.example/data")
+        let locked = try write("Library/Caches/locked/data").deletingLastPathComponent()
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: locked.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path) }
+        let names = JunkScanner(environment: env).scanEssentials().categories.flatMap(\.items).map(\.name)
+        #expect(names == ["org.example"])
     }
 
     // MARK: Scanners

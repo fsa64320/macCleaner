@@ -63,6 +63,15 @@ struct RealSystemTests {
         #expect(keychain.read("account") == nil)
     }
 
+    @Test func testDevToolsScanOnRealHome() {
+        let result = DevToolsScanner(environment: ScanEnvironment()).scan()
+        for category in result.categories {
+            let selected = category.items.filter(\.selectedByDefault).count
+            print("[devtools] \(category.title) : \(category.items.count) éléments, \(category.totalSize) octets, \(selected) présélectionnés")
+        }
+        #expect(!result.categories.flatMap(\.items).contains { $0.removal == .dockerImage && $0.selectedByDefault })
+    }
+
     private func launchctl(_ arguments: [String]) -> Int32 {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/launchctl")

@@ -3,6 +3,8 @@ import Foundation
 public struct JunkScanner: Sendable {
     private let env: ScanEnvironment
     private static let sensitiveCaches: Set<String> = ["CloudKit", "FamilyCircle", "Metadata", "GeoServices"]
+    /// Réservés au système : même leur propriétaire ne peut pas les déplacer.
+    private static let systemCaches: Set<String> = ["familycircled"]
 
     public init(environment: ScanEnvironment) { env = environment }
 
@@ -26,7 +28,7 @@ public struct JunkScanner: Sendable {
 
     private func userCaches(_ collector: inout Collector) -> ScanCategory {
         let root = env.library.appendingPathComponent("Caches")
-        let items = collector.children(of: root).map { url in
+        let items = collector.children(of: root).filter(isRemovableCache).map { url in
             cacheItem(url, detail: "Régénéré par l'application au besoin")
         }
         return ScanCategory(id: "user-caches", title: "Caches utilisateur", summary: "Fichiers temporaires des applications.", items: items)
@@ -125,6 +127,12 @@ public struct JunkScanner: Sendable {
 
     private func cacheItem(_ url: URL, detail: String) -> ScanItem {
         ScanItem(url: url, detail: detail, size: FileSystem.allocatedSize(of: url), selectedByDefault: isSafeCacheName(url.lastPathComponent))
+    }
+
+    /// Un dossier au contenu illisible échouerait au nettoyage : mieux vaut ne pas le proposer.
+    private func isRemovableCache(_ url: URL) -> Bool {
+        guard !Self.systemCaches.contains(url.lastPathComponent) else { return false }
+        return !FileSystem.isDirectory(url) || FileSystem.children(of: url) != nil
     }
 
     private func isSafeCacheName(_ name: String) -> Bool {

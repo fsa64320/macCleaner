@@ -6,6 +6,8 @@ public enum Removal: String, Sendable {
     case launchAgent
     /// Retire la copie locale ; le fichier reste dans le cloud.
     case evictLocalCopy
+    /// Image Docker, identifiée par `launchLabel`. Suppression définitive.
+    case dockerImage
 }
 
 public struct ScanItem: Identifiable, Hashable, Sendable {

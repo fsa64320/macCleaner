@@ -5,7 +5,7 @@ import SwiftUI
 import UserNotifications
 
 enum Module: String, CaseIterable, Identifiable {
-    case dashboard, smartCare, cleanup, performance, maintenance, uninstaller, leftovers, clutter, spaceLens, privacy, cloud, updates, monitoring, history, exclusions
+    case dashboard, smartCare, cleanup, performance, maintenance, uninstaller, leftovers, clutter, spaceLens, devTools, privacy, cloud, updates, monitoring, history, exclusions
 
     var id: String { rawValue }
 
@@ -20,6 +20,7 @@ enum Module: String, CaseIterable, Identifiable {
         case .leftovers: "Restes d'apps"
         case .clutter: "Encombrement"
         case .spaceLens: "Carte du disque"
+        case .devTools: "Outils de développement"
         case .privacy: "Confidentialité"
         case .cloud: "E-mail et cloud"
         case .updates: "Mises à jour"
@@ -40,6 +41,7 @@ enum Module: String, CaseIterable, Identifiable {
         case .leftovers: "Fichiers d'apps disparues et installateurs oubliés."
         case .clutter: "Gros fichiers, doublons et vieux téléchargements."
         case .spaceLens: "Voyez ce qui occupe réellement la place."
+        case .devTools: "Projets inactifs, caches de paquets et images Docker."
         case .privacy: "Traces des navigateurs et permissions accordées aux apps."
         case .cloud: "Libérez des copies locales, ou connectez un compte pour le nettoyer."
         case .updates: "Homebrew, mises à jour intégrées et App Store."
@@ -60,6 +62,7 @@ enum Module: String, CaseIterable, Identifiable {
         case .leftovers: "shippingbox"
         case .clutter: "doc.on.doc"
         case .spaceLens: "square.grid.3x3.square"
+        case .devTools: "hammer"
         case .privacy: "eye.slash"
         case .cloud: "cloud"
         case .updates: "arrow.down.app"
@@ -80,6 +83,7 @@ enum Module: String, CaseIterable, Identifiable {
         case .leftovers: .cyan
         case .clutter: .purple
         case .spaceLens: .pink
+        case .devTools: .orange
         case .privacy: .mint
         case .cloud: .blue
         case .updates: .blue
@@ -332,6 +336,7 @@ final class AppModel: ObservableObject {
             .clutter: ScanStore(module: .clutter, model: self) {
                 .merged([ClutterScanner(environment: environment).scan(), SimilarImageScanner(environment: environment).scan()])
             },
+            .devTools: ScanStore(module: .devTools, model: self) { DevToolsScanner(environment: environment).scan() },
             .cloud: ScanStore(module: .cloud, model: self) { CloudLocalScanner(environment: environment).scan() },
             .privacy: ScanStore(module: .privacy, model: self) {
                 PrivacyScanner(environment: environment, isRunning: isRunning).scan()

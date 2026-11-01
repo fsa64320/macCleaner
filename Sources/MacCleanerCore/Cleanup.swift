@@ -5,6 +5,7 @@ public protocol FileRemoving: Sendable {
     func deletePermanently(_ url: URL) throws
     func unloadLaunchAgent(label: String) throws
     func evictLocalCopy(_ url: URL) throws
+    func removeDockerImage(_ identifier: String) throws
 }
 
 public struct SystemFileRemover: FileRemoving {
@@ -22,6 +23,10 @@ public struct SystemFileRemover: FileRemoving {
 
     public func evictLocalCopy(_ url: URL) throws {
         try FileManager.default.evictUbiquitousItem(at: url)
+    }
+
+    public func removeDockerImage(_ identifier: String) throws {
+        try Docker.removeImage(identifier)
     }
 
     public func unloadLaunchAgent(label: String) throws {
@@ -50,9 +55,9 @@ public struct CleanupReport: Sendable {
 
     public init() {}
 
-    public var trashedSize: Int64 { removed.filter { $0.removal != .permanent && $0.removal != .evictLocalCopy }.reduce(0) { $0 + $1.size } }
+    public var trashedSize: Int64 { removed.filter { $0.removal == .moveToTrash || $0.removal == .launchAgent }.reduce(0) { $0 + $1.size } }
     public var evictedSize: Int64 { removed.filter { $0.removal == .evictLocalCopy }.reduce(0) { $0 + $1.size } }
-    public var permanentSize: Int64 { removed.filter { $0.removal == .permanent }.reduce(0) { $0 + $1.size } }
+    public var permanentSize: Int64 { removed.filter { $0.removal == .permanent || $0.removal == .dockerImage }.reduce(0) { $0 + $1.size } }
 }
 
 public struct CleanupRunner: Sendable {
@@ -85,6 +90,10 @@ public struct CleanupRunner: Sendable {
             }
             ScanProgress.current?.update(item.name, fraction: Double(index) / Double(items.count))
             guard !item.locked, !([item.url] + item.companions).contains(where: exclusions.covers) else { report.skipped.append(item); continue }
+            if item.removal == .dockerImage {
+                remove(dockerImage: item, into: &report)
+                continue
+            }
             // Un parent déjà retiré emporte ses enfants sélectionnés.
             guard FileSystem.entryExists(item.url) else { report.skipped.append(item); continue }
             do {
@@ -97,6 +106,8 @@ public struct CleanupRunner: Sendable {
                     try remover.deletePermanently(item.url)
                 case .evictLocalCopy:
                     try remover.evictLocalCopy(item.url)
+                case .dockerImage:
+                    break
                 case .launchAgent:
                     if let label = item.launchLabel { try remover.unloadLaunchAgent(label: label) }
                     try remover.moveToTrash(item.url)
@@ -110,6 +121,15 @@ public struct CleanupRunner: Sendable {
         writeLog(report)
         recordHistory(report)
         return report
+    }
+
+    private func remove(dockerImage item: ScanItem, into report: inout CleanupReport) {
+        do {
+            try remover.removeDockerImage(item.launchLabel ?? "")
+            report.removed.append(item)
+        } catch {
+            report.failures.append(CleanupFailure(item: item, reason: error.localizedDescription))
+        }
     }
 
     private func recordHistory(_ report: CleanupReport) {

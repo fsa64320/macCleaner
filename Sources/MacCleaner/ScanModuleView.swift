@@ -126,11 +126,11 @@ struct ScanModuleView: View {
     }
 
     private var confirmMessage: String {
-        let permanent = store.selectedItems.filter { $0.removal == .permanent }.count
+        let permanent = store.selectedItems.filter { $0.removal == .permanent || $0.removal == .dockerImage }.count
         let evicting = store.selectedItems.allSatisfy { $0.removal == .evictLocalCopy }
         if evicting { return "\(formatBytes(store.selectedSize)) d'espace libéré sur ce Mac. Les fichiers restent dans le cloud." }
         let base = "\(formatBytes(store.selectedSize)) seront envoyés à la Corbeille."
-        return permanent > 0 ? "\(base) ATTENTION : \(permanent) élément(s) des corbeilles seront supprimés définitivement." : base
+        return permanent > 0 ? "\(base) ATTENTION : \(permanent) élément(s) seront supprimés définitivement." : base
     }
 }
 

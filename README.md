@@ -9,6 +9,7 @@ C'est une réimplémentation indépendante : il ne contient ni code, ni assets, 
 - Entretien rapide : caches et journaux, en une passe.
 - Nettoyage : caches, Xcode, préférences cassées, corbeilles, résidus d'outils IA, modèles locaux, pièces jointes Mail.
 - Encombrement : gros fichiers, doublons, vieux téléchargements.
+- Outils de développement : dépendances de projets inactifs, caches de paquets et images Docker inutilisées.
 - Carte du disque : treemap navigable.
 - Désinstallation et restes d'applications.
 - Agents de démarrage et tâches de maintenance.
