@@ -108,6 +108,21 @@ enum CommandLineToolParsers {
         return json.compactMapValues { $0["latest"] as? String }
     }
 
+    /// Paquets périmés avec leur version actuelle. Le statut de sortie ne compte pas : `nil` si le JSON est illisible.
+    static func npmOutdatedPackages(_ data: Data) -> [InstalledPackage]? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Any]] else { return nil }
+        return json.compactMap { name, entry in
+            (entry["latest"] as? String).map { InstalledPackage(name: name, version: entry["current"] as? String ?? "?", latest: $0) }
+        }
+    }
+
+    static func uvOutdatedPackages(_ text: String) -> [InstalledPackage] {
+        let latest = uvOutdated(text)
+        return uvTools(text).compactMap { tool in
+            latest[tool.name].map { InstalledPackage(name: tool.name, version: tool.version, latest: $0) }
+        }
+    }
+
     /// `uv tool list` (avec ou sans `--show-paths`) : les lignes « - exécutable » sont ignorées.
     static func uvTools(_ text: String) -> [InstalledPackage] {
         text.split(whereSeparator: \.isNewline).compactMap { line -> InstalledPackage? in

@@ -1,6 +1,6 @@
 import Foundation
 
-/// Retrait des outils en ligne de commande installés via Homebrew, npm ou uv.
+/// Retrait et mise à jour des outils en ligne de commande installés via Homebrew, npm ou uv.
 public enum CommandLineTools {
     public enum Source: String, Sendable { case brew, cask, npm, uv }
 
@@ -175,15 +175,35 @@ public enum CommandLineTools {
         if let message = failureMessage(output) { throw failure(message) }
     }
 
-    /// Message d'échec en français, ou nil si le retrait a réussi.
-    static func failureMessage(_ result: Result) -> String? {
+    /// Homebrew garde son propre chemin de mise à jour, `Homebrew.upgrade`.
+    static func upgradeArguments(_ id: Identifier) throws -> [String] {
+        guard isValid(name: id.name) else { throw failure("Nom d'outil invalide.") }
+        switch id.source {
+        case .npm: return ["install", "-g", "--", "\(id.name)@latest"]
+        case .uv: return ["tool", "upgrade", "--", id.name]
+        case .brew, .cask: throw failure("Mise à jour non prise en charge ici.")
+        }
+    }
+
+    public static func upgrade(_ id: Identifier) throws {
+        let command = try upgradeArguments(id)
+        guard let output = execute(id.source, command, timeout: uninstallTimeout, mergeErrors: true) else {
+            throw failure("Outil introuvable ou impossible à lancer.")
+        }
+        if let message = failureMessage(output, isUpgrade: true) { throw failure(message) }
+    }
+
+    /// Message d'échec en français, ou nil si l'opération a réussi.
+    static func failureMessage(_ result: Result, isUpgrade: Bool = false) -> String? {
         let text = String(String(decoding: result.data, as: UTF8.self).prefix(500))
         if result.timedOut {
             let suffix = text.isEmpty ? "" : " Sortie : \(text)"
-            return "Délai dépassé : le retrait a été interrompu et peut être incomplet.\(suffix)"
+            let outcome = isUpgrade ? "la mise à jour a été interrompue et peut être incomplète" : "le retrait a été interrompu et peut être incomplet"
+            return "Délai dépassé : \(outcome).\(suffix)"
         }
         guard result.status != 0 else { return nil }
-        return text.isEmpty ? "Le retrait a échoué (code de sortie \(result.status)) sans message." : text
+        let action = isUpgrade ? "La mise à jour" : "Le retrait"
+        return text.isEmpty ? "\(action) a échoué (code de sortie \(result.status)) sans message." : text
     }
 
     private static func failure(_ message: String) -> NSError {

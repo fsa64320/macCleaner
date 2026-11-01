@@ -10,6 +10,9 @@ final class UpdateStore: ObservableObject {
     @Published var activity = ScanProgress.Snapshot()
     @Published var pending: AppUpdate?
     @Published var installing: AppUpdate?
+    @Published var confirmingAll = false
+    @Published var installingAll = false
+    @Published var stopRequested = false
     @Published var messages: [String: String] = [:]
 
     private var progress: ScanProgress?
@@ -41,18 +44,45 @@ final class UpdateStore: ObservableObject {
         progress?.cancel()
     }
 
-    func upgrade(_ update: AppUpdate, token: String, isCask: Bool) {
-        installing = update
+    var installable: [AppUpdate] { AppUpdate.installQueue(updates) }
+
+    func upgrade(_ update: AppUpdate) {
+        Task { await install(update) }
+    }
+
+    /// Un échec n'arrête pas la suite ; l'arrêt prend effet entre deux mises à jour.
+    func upgradeAll() {
+        let queue = installable
+        installingAll = true
+        stopRequested = false
         Task {
-            let outcome = await Task.detached { Result { try Homebrew.upgrade(token: token, isCask: isCask) } }.value
-            switch outcome {
-            case .success:
-                updates.removeAll { $0 == update }
-            case .failure(let error):
-                messages[update.id] = "Échec : \(error.localizedDescription)"
+            for update in queue where !stopRequested {
+                await install(update)
             }
-            installing = nil
+            installingAll = false
         }
+    }
+
+    private func install(_ update: AppUpdate) async {
+        let source = update.source
+        installing = update
+        messages[update.id] = nil
+        let outcome = await Task.detached {
+            Result {
+                switch source {
+                case .homebrew(let token, let isCask): try Homebrew.upgrade(token: token, isCask: isCask)
+                case .commandLine(let tool): try CommandLineTools.upgrade(tool)
+                case .sparkle, .appStore: break
+                }
+            }
+        }.value
+        switch outcome {
+        case .success:
+            updates.removeAll { $0 == update }
+        case .failure(let error):
+            messages[update.id] = "Échec : \(error.localizedDescription)"
+        }
+        installing = nil
     }
 }
 
@@ -77,14 +107,29 @@ struct UpdatesView: View {
             titleVisibility: .visible
         ) {
             Button("Mettre à jour") {
-                if let update = store.pending, case .homebrew(let token, let isCask) = update.source {
-                    store.upgrade(update, token: token, isCask: isCask)
-                }
+                if let update = store.pending { store.upgrade(update) }
             }
             Button("Annuler", role: .cancel) {}
         } message: {
-            Text("Homebrew installera la version \(store.pending?.latest ?? "").")
+            Text("\(store.pending?.sourceName ?? "") installera la version \(store.pending?.latest ?? "").")
         }
+        .confirmationDialog(
+            "Tout mettre à jour ?", isPresented: $store.confirmingAll, titleVisibility: .visible
+        ) {
+            Button("Mettre à jour \(store.installable.count) élément(s)") { store.upgradeAll() }
+            Button("Annuler", role: .cancel) {}
+        } message: {
+            Text(allMessage)
+        }
+    }
+
+    private var allMessage: String {
+        let names = store.installable.prefix(12).map(\.name).joined(separator: ", ")
+        let hidden = store.installable.count - min(store.installable.count, 12)
+        let more = hidden > 0 ? " et \(hidden) autre(s)" : ""
+        let manual = store.updates.count - store.installable.count
+        let rest = manual > 0 ? " \(manual) mise(s) à jour à faire depuis l'app ou l'App Store ne seront pas lancées." : ""
+        return "\(names)\(more). Les mises à jour se suivent, et un échec n'arrête pas les suivantes.\(rest)"
     }
 
     private var intro: some View {
@@ -125,8 +170,17 @@ struct UpdatesView: View {
             }
             HStack {
                 Button("Nouvelle recherche") { store.scan(environment: model.environment) }
+                    .disabled(store.installing != nil)
                 Spacer()
                 Text("\(store.updates.count) mise(s) à jour").monospacedDigit()
+                if store.installingAll {
+                    Button(store.stopRequested ? "Arrêt après celle-ci…" : "Arrêter") { store.stopRequested = true }
+                        .disabled(store.stopRequested)
+                } else {
+                    Button("Tout mettre à jour…") { store.confirmingAll = true }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(store.installable.isEmpty || store.installing != nil)
+                }
             }
             .padding(14).background(.bar)
         }
@@ -137,7 +191,7 @@ struct UpdatesView: View {
             ProgressView().controlSize(.small)
         } else {
             switch update.source {
-            case .homebrew:
+            case .homebrew, .commandLine:
                 Button("Mettre à jour…") { store.pending = update }.disabled(store.installing != nil)
             case .sparkle(let app):
                 Button("Ouvrir l'app") { NSWorkspace.shared.open(app) }

@@ -401,7 +401,7 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
         let scanner = UpdateScanner(environment: env, fetch: { url in
             requested.add(url)
             return Data((url.host == "itunes.apple.com" ? lookup : feed).utf8)
-        }, brewOutdated: { Data(brew.utf8) })
+        }, brewOutdated: { Data(brew.utf8) }, toolRunner: { _, _, _ in nil })
         let updates = scanner.scan()
         #expect(updates.map(\.name) == ["plain", "Spark", "Store", "wget"])
         #expect(!requested.urls.contains { $0.scheme == "http" })
@@ -414,8 +414,66 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
             let isMac = url.query?.contains("entity=desktopSoftware") == true
             let version = isMac ? "1.0" : "2.0"
             return Data(#"{"results":[{"version":"\#(version)","trackViewUrl":"https://apps.apple.com/app/id1"}]}"#.utf8)
-        }, brewOutdated: { nil })
+        }, brewOutdated: { nil }, toolRunner: { _, _, _ in nil })
         #expect(scanner.scan().isEmpty)
+    }
+
+    @Test func testUpdatesIncludeNpmAndUv() {
+        let npm = #"{"omniroute":{"current":"3.8.52","wanted":"3.9.0","latest":"3.9.0"}}"#
+        let uv = "graphifyy v0.9.95 [latest: 0.9.100]\n- graphify\n"
+        let scanner = UpdateScanner(environment: env, fetch: { _ in nil }, brewOutdated: { nil }, toolRunner: { tool, arguments, _ in
+            switch (tool, arguments) {
+            case (.npm, ["outdated", "-g", "--json"]): Docker.Output(data: Data(npm.utf8), status: 1)
+            case (.uv, ["tool", "list", "--outdated"]): Docker.Output(data: Data(uv.utf8), status: 0)
+            default: nil
+            }
+        })
+        let updates = scanner.scan()
+        #expect(updates.map(\.name) == ["graphifyy", "omniroute"])
+        #expect(updates.map(\.current) == ["0.9.95", "3.8.52"])
+        #expect(updates.map(\.latest) == ["0.9.100", "3.9.0"])
+        #expect(updates.map(\.sourceName) == ["uv", "npm"])
+        #expect(updates[1].source == .commandLine(CommandLineTools.Identifier(source: .npm, name: "omniroute")))
+    }
+
+    @Test func testUpdatesSurviveCommandLineFailures() {
+        let scanner = UpdateScanner(environment: env, fetch: { _ in nil }, brewOutdated: { nil }, toolRunner: { tool, _, _ in
+            Docker.Output(data: Data("graphifyy v0.9.95 [latest: 0.9.100]\nnot json".utf8), status: 1)
+        })
+        #expect(scanner.scan().isEmpty)
+    }
+
+    @Test func testInstallQueueOrdersAndFiltersUpdates() {
+        func tool(_ source: CommandLineTools.Source, _ name: String) -> AppUpdate {
+            AppUpdate(name: name, current: "1", latest: "2", source: .commandLine(CommandLineTools.Identifier(source: source, name: name)))
+        }
+        let page = URL(string: "https://apps.apple.com/app/id1")!
+        let queue = AppUpdate.installQueue([
+            tool(.npm, "npm"), tool(.uv, "graphifyy"), tool(.npm, "omniroute"),
+            AppUpdate(name: "Store", current: "1", latest: "2", source: .appStore(page: page)),
+            AppUpdate(name: "Spark", current: "1", latest: "2", source: .sparkle(app: page)),
+            AppUpdate(name: "wget", current: "1", latest: "2", source: .homebrew(token: "wget", isCask: false)),
+            tool(.npm, "corepack"),
+        ])
+        #expect(queue.map(\.name) == ["wget", "omniroute", "corepack", "graphifyy", "npm"])
+    }
+
+    @Test func testUpgradeArguments() throws {
+        let npm = CommandLineTools.Identifier(source: .npm, name: "@anthropic-ai/claude-code")
+        #expect(try CommandLineTools.upgradeArguments(npm) == ["install", "-g", "--", "@anthropic-ai/claude-code@latest"])
+        let uv = CommandLineTools.Identifier(source: .uv, name: "graphifyy")
+        #expect(try CommandLineTools.upgradeArguments(uv) == ["tool", "upgrade", "--", "graphifyy"])
+        for id in [CommandLineTools.Identifier(source: .npm, name: "--force"), CommandLineTools.Identifier(source: .uv, name: "a b"),
+                   CommandLineTools.Identifier(source: .brew, name: "wget")] {
+            #expect(throws: (any Error).self) { try CommandLineTools.upgradeArguments(id) }
+        }
+    }
+
+    @Test func testUpgradeFailureMessagesNameTheUpgrade() throws {
+        let silent = CommandLineTools.Result(data: Data(), status: 3, timedOut: false)
+        #expect(CommandLineTools.failureMessage(silent, isUpgrade: true)?.hasPrefix("La mise à jour a échoué") == true)
+        let late = CommandLineTools.Result(data: Data(), status: -1, timedOut: true)
+        #expect(CommandLineTools.failureMessage(late, isUpgrade: true)?.contains("la mise à jour a été interrompue et peut être incomplète") == true)
     }
 
     @Test func testHomebrewRejectsUnsafeTokens() {
