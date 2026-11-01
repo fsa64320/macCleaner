@@ -23,9 +23,13 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
     func removeDockerImage(_ identifier: String) throws { dockerImages.append(identifier) }
     var tools: [(identifier: String, arguments: [String])] = []
     var failingTools: Set<String> = []
-    struct ToolFailure: LocalizedError { var errorDescription: String? { "échec simulé" } }
+    var failureMessage = "échec simulé"
+    struct ToolFailure: LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
     func uninstallCommandLineTool(_ identifier: String, arguments: [String]) throws {
-        if failingTools.contains(identifier) { throw ToolFailure() }
+        if failingTools.contains(identifier) { throw ToolFailure(message: failureMessage) }
         tools.append((identifier, arguments))
     }
     func deletePermanently(_ url: URL) throws { deleted.append(url) }
@@ -622,6 +626,89 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
                             launchLabel: "brew:ripgrep", reinstallCommand: "brew install ripgrep")
         _ = CleanupRunner(remover: RecordingRemover(), environment: env, history: history, module: "Test").run([item])
         #expect(history.load().entries.first?.reinstallCommands == ["brew install ripgrep"])
+    }
+
+    @Test func testRunnerSkipsToolWithExcludedDependency() throws {
+        let dependency = home.appendingPathComponent("Cellar/gts")
+        var exclusions = Exclusions()
+        exclusions.add(dependency)
+        let remover = RecordingRemover()
+        let report = CleanupRunner(remover: remover, environment: env, exclusions: exclusions).run([
+            ScanItem(url: home.appendingPathComponent("Cellar/graphviz"), size: 1, removal: .commandLineTool,
+                     launchLabel: "brew:graphviz", removalArguments: ["gts"], dependencyPaths: [dependency]),
+        ])
+        #expect(report.skipped.count == 1)
+        #expect(remover.tools.isEmpty)
+    }
+
+    @Test func testRemovedDependenciesLeaveTraces() throws {
+        let history = CleanupHistory(fileURL: home.appendingPathComponent("history.jsonl"))
+        let log = home.appendingPathComponent("cleanup.log")
+        let tool = home.appendingPathComponent("Cellar/graphviz")
+        let dependency = home.appendingPathComponent("Cellar/gts")
+        let item = ScanItem(url: tool, size: 10, removal: .commandLineTool, launchLabel: "brew:graphviz",
+                            removalArguments: ["gts"], dependencyPaths: [dependency])
+        _ = CleanupRunner(remover: RecordingRemover(), environment: env, logURL: log, history: history, module: "Test").run([item])
+        #expect(history.load().entries.first?.paths == [tool.path, dependency.path])
+        let lines = try String(contentsOf: log, encoding: .utf8).split(separator: "\n")
+        #expect(lines.count == 2)
+        #expect(lines[1].hasSuffix("OK commandLineTool \(dependency.path) (dépendance de graphviz)"))
+    }
+
+    @Test func testFailureReasonStaysOnOneLogLine() throws {
+        let log = home.appendingPathComponent("cleanup.log")
+        let remover = RecordingRemover()
+        remover.failingTools = ["brew:broken"]
+        remover.failureMessage = "Error: un\nFAUX OK\r\ndeux"
+        let item = ScanItem(url: home.appendingPathComponent("Cellar/broken"), size: 1, removal: .commandLineTool, launchLabel: "brew:broken")
+        let report = CleanupRunner(remover: remover, environment: env, logURL: log).run([item])
+        let text = try String(contentsOf: log, encoding: .utf8)
+        #expect(text.split(whereSeparator: \.isNewline).count == 1)
+        #expect(text.contains("Error: un FAUX OK deux"))
+        #expect(report.failures.first?.reason.contains("\n") == true)
+    }
+
+    private func tool(_ name: String, deps: [String] = [], warning: String? = nil) -> ScanItem {
+        ScanItem(url: home.appendingPathComponent(name), name: name, size: 1, removal: .commandLineTool,
+                 launchLabel: "brew:\(name)", removalArguments: deps, warning: warning)
+    }
+
+    @Test func testConfirmationNamesToolsDependenciesAndAlerts() {
+        let text = CommandLineToolConfirmation.message(
+            for: [tool("graphviz", deps: ["gts", "netpbm"]), tool("node@24", warning: "Attention : environnement d'exécution")],
+            formattedSize: "12 Mo"
+        )
+        #expect(text.contains("12 Mo"))
+        #expect(text.contains("définitivement") && text.contains("Corbeille"))
+        #expect(text.contains("graphviz, avec gts, netpbm"))
+        #expect(text.contains("node@24"))
+        #expect(text.contains("Attention : environnement d'exécution"))
+    }
+
+    @Test func testConfirmationBoundsLists() {
+        let deps = (1...11).map { "dep\($0)" }
+        let tools = [tool("first", deps: deps)] + (1...14).map { tool("tool\($0)") }
+        let text = CommandLineToolConfirmation.message(for: tools, formattedSize: "1 Mo")
+        #expect(text.contains("dep8") && !text.contains("dep9"))
+        #expect(text.contains("et 3 autre(s)"))
+        #expect(text.contains("tool11") && !text.contains("tool12"))
+        #expect(text.contains("et 3 autre(s) outil(s)"))
+    }
+
+    @Test func testConfirmationKeepsAlertsPastTheBound() {
+        let tools = (1...13).map { tool("tool\($0)") } + [tool("gh", warning: "Attention : outil de ce dépôt")]
+        let text = CommandLineToolConfirmation.message(for: tools, formattedSize: "1 Mo")
+        #expect(text.contains("Attention : outil de ce dépôt"))
+        let warned = (1...14).map { tool("w\($0)", warning: "Attention : a\($0)") }
+        let bounded = CommandLineToolConfirmation.message(for: warned, formattedSize: "1 Mo")
+        #expect(bounded.contains("et 2 autre(s) outil(s), dont 2 avec alerte"))
+    }
+
+    @Test func testConfirmationListingForMixedSelection() {
+        #expect(CommandLineToolConfirmation.listing(for: []).isEmpty)
+        let listing = CommandLineToolConfirmation.listing(for: [tool("gh", warning: "Attention : outil de ce dépôt")])
+        #expect(listing.contains("gh") && listing.contains("Attention : outil de ce dépôt"))
+        #expect(!listing.contains("Corbeille"))
     }
 
     @Test func testHistoryReadsOldLines() throws {

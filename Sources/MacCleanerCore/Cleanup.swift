@@ -94,7 +94,7 @@ public struct CleanupRunner: Sendable {
                 break
             }
             ScanProgress.current?.update(item.name, fraction: Double(index) / Double(items.count))
-            guard !item.locked, !([item.url] + item.companions).contains(where: exclusions.covers) else { report.skipped.append(item); continue }
+            guard !item.locked, !([item.url] + item.companions + item.dependencyPaths).contains(where: exclusions.covers) else { report.skipped.append(item); continue }
             if item.removal == .dockerImage || item.removal == .commandLineTool {
                 remove(byCommand: item, into: &report)
                 continue
@@ -150,7 +150,7 @@ public struct CleanupRunner: Sendable {
             trashedBytes: report.trashedSize, permanentBytes: report.permanentSize,
             evictedBytes: report.evictedSize,
             failureCount: report.failures.count, cancelledCount: report.cancelledCount,
-            paths: report.removed.map(\.url.path),
+            paths: report.removed.flatMap { [$0.url.path] + $0.dependencyPaths.map(\.path) },
             reinstallCommands: reinstall.isEmpty ? nil : reinstall
         ))
     }
@@ -158,8 +158,14 @@ public struct CleanupRunner: Sendable {
     private func writeLog(_ report: CleanupReport) {
         guard let logURL else { return }
         let stamp = ISO8601DateFormatter().string(from: Date())
-        var lines = report.removed.map { "\(stamp) OK \($0.removal.rawValue) \($0.url.path)" }
-        lines += report.failures.map { "\(stamp) ECHEC \($0.item.url.path) : \($0.reason)" }
+        var lines = report.removed.flatMap { item in
+            ["\(stamp) OK \(item.removal.rawValue) \(item.url.path)"]
+                + item.dependencyPaths.map { "\(stamp) OK \(item.removal.rawValue) \($0.path) (dépendance de \(item.name))" }
+        }
+        // Une raison sur plusieurs lignes imiterait d'autres entrées du journal.
+        lines += report.failures.map {
+            "\(stamp) ECHEC \($0.item.url.path) : \($0.reason.components(separatedBy: .newlines).filter { !$0.isEmpty }.joined(separator: " "))"
+        }
         guard !lines.isEmpty else { return }
         try? FileSystem.append(Data((lines.joined(separator: "\n") + "\n").utf8), to: logURL)
     }

@@ -113,10 +113,17 @@ final class ScanStore: ObservableObject {
 
     private let module: Module
     private unowned let model: AppModel
-    private let scanner: @Sendable () -> ScanResult
+    private let scanner: @Sendable (Exclusions) -> ScanResult
     private var progress: ScanProgress?
 
     init(module: Module, model: AppModel, scanner: @escaping @Sendable () -> ScanResult) {
+        self.module = module
+        self.model = model
+        self.scanner = { _ in scanner() }
+    }
+
+    /// Pour un scanner qui tient compte des exclusions, lues au moment de chaque analyse.
+    init(module: Module, model: AppModel, excludingScanner scanner: @escaping @Sendable (Exclusions) -> ScanResult) {
         self.module = module
         self.model = model
         self.scanner = scanner
@@ -129,8 +136,9 @@ final class ScanStore: ObservableObject {
     func scan() {
         phase = .scanning
         let scanner = scanner
+        let exclusions = model.exclusions
         Task {
-            let (result, cancelled) = await track { scanner() }
+            let (result, cancelled) = await track { scanner(exclusions) }
             guard !cancelled else {
                 phase = .idle
                 return
@@ -167,7 +175,7 @@ final class ScanStore: ObservableObject {
     }
 
     func toggle(_ category: ScanCategory) {
-        let ids = category.items.filter { !$0.locked }.map(\.id)
+        let ids = category.bulkSelectableItems.map(\.id)
         if ids.allSatisfy(selection.contains) { selection.subtract(ids) } else { selection.formUnion(ids) }
     }
 
@@ -341,7 +349,9 @@ final class AppModel: ObservableObject {
                 .merged([ClutterScanner(environment: environment).scan(), SimilarImageScanner(environment: environment).scan()])
             },
             .devTools: ScanStore(module: .devTools, model: self) { DevToolsScanner(environment: environment).scan() },
-            .cliTools: ScanStore(module: .cliTools, model: self) { CommandLineToolScanner(environment: environment).scan() },
+            .cliTools: ScanStore(module: .cliTools, model: self, excludingScanner: { exclusions in
+                CommandLineToolScanner(environment: environment, exclusions: exclusions).scan()
+            }),
             .cloud: ScanStore(module: .cloud, model: self) { CloudLocalScanner(environment: environment).scan() },
             .privacy: ScanStore(module: .privacy, model: self) {
                 PrivacyScanner(environment: environment, isRunning: isRunning).scan()

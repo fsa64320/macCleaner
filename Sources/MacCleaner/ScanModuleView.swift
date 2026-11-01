@@ -126,15 +126,17 @@ struct ScanModuleView: View {
     }
 
     private var confirmMessage: String {
+        let tools = store.selectedItems.filter { $0.removal == .commandLineTool }
         let permanent = store.selectedItems.filter { $0.removal == .permanent || $0.removal == .dockerImage || $0.removal == .commandLineTool }.count
         // Une sélection composée uniquement d'outils : message dédié, sans mention de la Corbeille.
-        if !store.selectedItems.isEmpty, store.selectedItems.allSatisfy({ $0.removal == .commandLineTool }) {
-            return "\(formatBytes(store.selectedSize)) seront libérés. Ces outils seront désinstallés définitivement, sans passer par la Corbeille."
+        if !store.selectedItems.isEmpty, tools.count == store.selectedItems.count {
+            return CommandLineToolConfirmation.message(for: tools, formattedSize: formatBytes(store.selectedSize))
         }
         let evicting = store.selectedItems.allSatisfy { $0.removal == .evictLocalCopy }
         if evicting { return "\(formatBytes(store.selectedSize)) d'espace libéré sur ce Mac. Les fichiers restent dans le cloud." }
         let base = "\(formatBytes(store.selectedSize)) seront envoyés à la Corbeille."
-        return permanent > 0 ? "\(base) ATTENTION : \(permanent) élément(s) seront supprimés définitivement." : base
+        let text = permanent > 0 ? "\(base) ATTENTION : \(permanent) élément(s) seront supprimés définitivement." : base
+        return tools.isEmpty ? text : "\(text)\n\n\(CommandLineToolConfirmation.listing(for: tools))"
     }
 }
 
@@ -151,6 +153,9 @@ private struct CategoryRow: View {
                             Text(item.name).lineLimit(1)
                             if !item.detail.isEmpty {
                                 Text(item.detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                            if let warning = item.warning {
+                                Text(warning).font(.caption).foregroundStyle(.orange)
                             }
                         }
                     }
@@ -183,7 +188,7 @@ private struct CategoryRow: View {
     }
 
     private var isFullySelected: Bool {
-        let ids = category.items.filter { !$0.locked }.map(\.id)
+        let ids = category.bulkSelectableItems.map(\.id)
         return !ids.isEmpty && ids.allSatisfy(store.selection.contains)
     }
 }

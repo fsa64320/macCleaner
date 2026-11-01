@@ -190,3 +190,38 @@ public enum CommandLineTools {
         NSError(domain: "CommandLineTools", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
     }
 }
+
+/// Texte de confirmation : ce qui part vraiment, avant un retrait sans Corbeille.
+public enum CommandLineToolConfirmation {
+    private static let toolLimit = 12
+    private static let dependencyLimit = 8
+
+    public static func message(for items: [ScanItem], formattedSize: String) -> String {
+        let intro = "\(formattedSize) seront libérés. Ces outils seront désinstallés définitivement, sans passer par la Corbeille."
+        let listing = listing(for: items)
+        return listing.isEmpty ? intro : "\(intro)\n\n\(listing)"
+    }
+
+    /// Une ligne par outil. Les outils alertés passent en tête : la limite ne doit pas masquer une alerte.
+    public static func listing(for items: [ScanItem]) -> String {
+        let ordered = items.filter { $0.warning != nil } + items.filter { $0.warning == nil }
+        var lines = ordered.prefix(toolLimit).map(line)
+        let hidden = ordered.dropFirst(toolLimit)
+        if !hidden.isEmpty {
+            let warned = hidden.filter { $0.warning != nil }.count
+            lines.append("et \(hidden.count) autre(s) outil(s)" + (warned > 0 ? ", dont \(warned) avec alerte" : ""))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private static func line(_ item: ScanItem) -> String {
+        var text = "• \(item.name)"
+        let dependencies = item.removalArguments
+        if !dependencies.isEmpty {
+            text += ", avec " + dependencies.prefix(dependencyLimit).joined(separator: ", ")
+            if dependencies.count > dependencyLimit { text += " et \(dependencies.count - dependencyLimit) autre(s)" }
+        }
+        if let warning = item.warning { text += "\n  \(warning)" }
+        return text
+    }
+}
