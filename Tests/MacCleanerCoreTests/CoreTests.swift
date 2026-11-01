@@ -759,9 +759,56 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
         for name in ["ripgrep", "node@24", "@anthropic-ai/claude-code", "arthur-ficial/tap/apfel-gui", "graphifyy"] {
             #expect(CommandLineTools.isValid(name: name))
         }
-        for name in ["--force", "-g", "a b", "a;rm", "", "../x"] {
+        for name in ["--force", "-g", "a b", "a;rm", "", "../x", "ripgrep\n"] {
             #expect(!CommandLineTools.isValid(name: name))
         }
+    }
+
+    @Test func testCommandEnvironmentDisablesAutoremove() {
+        let environment = CommandLineTools.commandEnvironment(
+            from: ["HOME": "/Users/x", "PATH": "/ailleurs"], searchDirectories: ["/opt/homebrew/bin"]
+        )
+        #expect(environment["HOMEBREW_NO_AUTOREMOVE"] == "1")
+        #expect(environment["HOMEBREW_NO_AUTO_UPDATE"] == "1")
+        #expect(environment["PATH"] == "/opt/homebrew/bin:/usr/bin:/bin")
+        #expect(environment["HOME"] == "/Users/x")
+        #expect(CommandLineTools.commandEnvironment(from: ["HOMEBREW_NO_AUTOREMOVE": "0"], searchDirectories: [])["HOMEBREW_NO_AUTOREMOVE"] == "1")
+    }
+
+    @Test func testCaskRunsThroughBrew() {
+        #expect(CommandLineTools.executableName(for: .cask) == "brew")
+        #expect(CommandLineTools.executableName(for: .brew) == "brew")
+        #expect(CommandLineTools.executableName(for: .npm) == "npm")
+        #expect(CommandLineTools.executableName(for: .uv) == "uv")
+    }
+
+    @Test func testUninstallCommandDropsVanishedDependencies() throws {
+        try write("brew/Cellar/graphviz/1/f")
+        try write("brew/Cellar/gts/1/f")
+        try write("brew/Cellar/apfel/1/f")
+        let prefix = home.appendingPathComponent("brew")
+        let brew = CommandLineTools.Identifier(source: .brew, name: "graphviz")
+        let command = try CommandLineTools.uninstallCommand(brew, extra: ["gts", "disparu", "user/tap/apfel", "user/tap/parti"], homebrewPrefix: prefix)
+        #expect(command == ["uninstall", "--", "graphviz", "gts", "user/tap/apfel"])
+    }
+
+    @Test func testUninstallCommandKeepsMissingToolItself() throws {
+        let brew = CommandLineTools.Identifier(source: .brew, name: "disparu")
+        let command = try CommandLineTools.uninstallCommand(brew, extra: [], homebrewPrefix: home.appendingPathComponent("brew"))
+        #expect(command == ["uninstall", "--", "disparu"])
+    }
+
+    @Test func testUninstallCommandStillRejectsInvalidExtras() {
+        let brew = CommandLineTools.Identifier(source: .brew, name: "graphviz")
+        #expect(throws: (any Error).self) {
+            try CommandLineTools.uninstallCommand(brew, extra: ["--force"], homebrewPrefix: self.home)
+        }
+    }
+
+    @Test func testUninstallCommandFiltersOnlyHomebrewFormulae() throws {
+        let npm = CommandLineTools.Identifier(source: .npm, name: "omniroute")
+        let command = try CommandLineTools.uninstallCommand(npm, extra: ["x"], homebrewPrefix: home)
+        #expect(command == ["uninstall", "-g", "--", "omniroute", "x"])
     }
 
     @Test func testUninstallArguments() throws {

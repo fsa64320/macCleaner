@@ -45,10 +45,24 @@ public enum CommandLineTools {
         return ["/opt/homebrew/bin", "/usr/local/bin", "\(home)/.local/bin"]
     }
 
+    /// Un cask passe par `brew` : `cask` n'est pas un exécutable.
+    static func executableName(for tool: Source) -> String {
+        tool == .cask ? "brew" : tool.rawValue
+    }
+
     private static func executable(for tool: Source) -> String? {
         let directories = tool == .uv ? searchDirectories : Array(searchDirectories.prefix(2))
-        let name = tool == .cask ? "brew" : tool.rawValue
-        return directories.map { "\($0)/\(name)" }.first(where: FileManager.default.isExecutableFile)
+        return directories.map { "\($0)/\(executableName(for: tool))" }.first(where: FileManager.default.isExecutableFile)
+    }
+
+    /// Environnement des commandes. `brew uninstall` lance `autoremove` par défaut, ce qui retirerait
+    /// tous les orphelins de la machine : `HOMEBREW_NO_AUTOREMOVE` l'en empêche.
+    static func commandEnvironment(from base: [String: String], searchDirectories: [String]) -> [String: String] {
+        var environment = base
+        environment["HOMEBREW_NO_AUTO_UPDATE"] = "1"
+        environment["HOMEBREW_NO_AUTOREMOVE"] = "1"
+        environment["PATH"] = (searchDirectories + ["/usr/bin", "/bin"]).joined(separator: ":")
+        return environment
     }
 
     /// Exécute l'outil sans shell. Avec `mergeErrors`, stderr rejoint stdout pour remonter le message d'échec.
@@ -56,9 +70,7 @@ public enum CommandLineTools {
         _ tool: Source, _ arguments: [String], timeout: TimeInterval, mergeErrors: Bool
     ) -> Result? {
         guard let executable = executable(for: tool) else { return nil }
-        var environment = ProcessInfo.processInfo.environment
-        environment["HOMEBREW_NO_AUTO_UPDATE"] = "1"
-        environment["PATH"] = (searchDirectories + ["/usr/bin", "/bin"]).joined(separator: ":")
+        let environment = commandEnvironment(from: ProcessInfo.processInfo.environment, searchDirectories: searchDirectories)
         return launch(
             executable, arguments, environment: environment, timeout: timeout, mergeErrors: mergeErrors
         )
@@ -115,7 +127,7 @@ public enum CommandLineTools {
     static func isValid(name: String) -> Bool {
         !name.contains("..")
             && name.range(
-                of: "^@?[A-Za-z0-9][A-Za-z0-9@._+-]*(/[A-Za-z0-9][A-Za-z0-9@._+-]*)*$", options: .regularExpression
+                of: "^@?[A-Za-z0-9][A-Za-z0-9@._+-]*(/[A-Za-z0-9][A-Za-z0-9@._+-]*)*\\z", options: .regularExpression
             ) != nil
     }
 
@@ -133,9 +145,30 @@ public enum CommandLineTools {
         return prefix + ["--", id.name] + extra
     }
 
+    /// Nom sans le préfixe de tap : c'est celui du dossier dans le Cellar.
+    static func baseName(_ name: String) -> String {
+        String(name.split(separator: "/").last ?? "")
+    }
+
+    /// Commande de retrait. Une formule supplémentaire déjà disparue ferait échouer `brew` après coup :
+    /// elle est écartée, après validation de tous les noms. L'outil lui-même reste, et son absence échoue.
+    static func uninstallCommand(_ id: Identifier, extra: [String], homebrewPrefix: URL?) throws -> [String] {
+        _ = try uninstallArguments(id, extra: extra)
+        guard id.source == .brew, let homebrewPrefix else { return try uninstallArguments(id, extra: extra) }
+        let cellar = homebrewPrefix.appendingPathComponent("Cellar")
+        let present = extra.filter {
+            FileManager.default.fileExists(atPath: cellar.appendingPathComponent(baseName($0)).path)
+        }
+        return try uninstallArguments(id, extra: present)
+    }
+
+    private static var homebrewPrefix: URL? {
+        executable(for: .brew).map { URL(fileURLWithPath: $0).deletingLastPathComponent().deletingLastPathComponent() }
+    }
+
     public static func uninstall(identifier: String, arguments: [String]) throws {
         guard let id = Identifier(encoded: identifier) else { throw failure("Identifiant d'outil invalide.") }
-        let command = try uninstallArguments(id, extra: arguments)
+        let command = try uninstallCommand(id, extra: arguments, homebrewPrefix: homebrewPrefix)
         guard let output = execute(id.source, command, timeout: uninstallTimeout, mergeErrors: true) else {
             throw failure("Outil introuvable ou impossible à lancer.")
         }
