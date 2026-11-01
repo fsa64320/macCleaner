@@ -32,6 +32,8 @@ public struct SafetyPolicy: Sendable {
         protectedExact = Set(
             ["", ".Trash", "Library", "Library/Caches", "Library/Logs", "Library/Preferences",
              "Library/Application Support", "Library/Containers", "Library/LaunchAgents",
+             "Library/Group Containers", "Library/Application Scripts", "Library/WebKit", "Library/HTTPStorages",
+             "Library/Saved Application State",
              "Applications", "Desktop", "Documents", "Downloads", "Movies", "Music", "Pictures", "Public"]
                 .map { $0.isEmpty ? home : "\(home)/\($0)" }
         )

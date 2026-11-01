@@ -784,6 +784,59 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
         let result = ApplicationScanner(environment: env).scanLeftovers()
         #expect(Set(result.categories[0].items.map(\.name)) == ["com.gone.app", "com.gone.other.plist"])
         #expect(result.categories[1].items.map(\.name) == ["setup.dmg"])
+        #expect(Set(result.categories[2].items.map(\.name)) == ["com.acme.helper", "NotBundleID"])
+    }
+
+    private func names(_ result: ScanResult, _ category: String) -> Set<String> {
+        Set(result.categories.first { $0.id == category }?.items.map(\.name) ?? [])
+    }
+
+    @Test func testLeftoversReadEveryPrefixFolderAndEmptyEntry() throws {
+        try FileManager.default.createDirectory(at: home.appendingPathComponent("Library/Application Support/com.gone.empty"), withIntermediateDirectories: true)
+        try write("Library/Preferences/ru.gone.Telegram.plist")
+        try write("Library/Group Containers/ABCDE12345.group.net.gone.shared/x")
+        try write("Library/Application Scripts/ABCDE12345.net.gone.ext/x")
+        try write("Library/WebKit/ai.gone.mac/x")
+        let scanner = ApplicationScanner(environment: env, commandDirectories: [])
+        let result = scanner.scanLeftovers()
+        #expect(names(result, "leftovers") == ["com.gone.empty", "ru.gone.Telegram.plist", "ai.gone.mac"])
+        #expect(names(result, "leftovers-review") == ["ABCDE12345.group.net.gone.shared", "ABCDE12345.net.gone.ext"])
+    }
+
+    @Test func testLeftoversKeepInstalledAppData() throws {
+        try makeApp("Visual Studio Code", id: "com.microsoft.VSCode")
+        try makeApp("Google Chrome", id: "com.google.Chrome")
+        try write("Library/Application Support/Code/x")
+        try write("Library/Application Support/Google/x")
+        try write("Library/Application Support/Homebrew/x")
+        try write("Library/Containers/com.google.Chrome.helper/x")
+        try write("Library/Group Containers/ABCDE12345.com.apple.shared/x")
+        try write("Library/Group Containers/group.com.apple.notes/x")
+        try write("Library/Group Containers/group.is.workflow.my.app/x")
+        try write("Library/Caches/.hidden/x")
+        try write("Library/Preferences/loginwindow.plist")
+        let result = ApplicationScanner(environment: env, commandDirectories: []).scanLeftovers()
+        #expect(names(result, "leftovers").isEmpty)
+        #expect(names(result, "leftovers-review").isEmpty)
+    }
+
+    @Test func testLeftoversSendCommandDataToReview() throws {
+        let bin = home.appendingPathComponent("bin")
+        try write("bin/swift")
+        try write("bin/mytool")
+        try write("Library/Caches/org.swift.swiftpm/x")
+        try write("Library/Application Support/mytool/x")
+        try write("Library/Application Support/Forgotten App/x")
+        let result = ApplicationScanner(environment: env, commandDirectories: [bin]).scanLeftovers()
+        #expect(names(result, "leftovers").isEmpty)
+        #expect(names(result, "leftovers-review") == ["org.swift.swiftpm", "Forgotten App"])
+    }
+
+    @Test func testPolicyProtectsNewLibraryRoots() {
+        let policy = SafetyPolicy(environment: env)
+        for folder in ["Group Containers", "Application Scripts", "WebKit", "HTTPStorages", "Saved Application State"] {
+            #expect(throws: (any Error).self) { try policy.validate(home.appendingPathComponent("Library/\(folder)"), removal: .moveToTrash) }
+        }
     }
 
     @Test func testClutterFindsDuplicatesAndLargeFiles() throws {
