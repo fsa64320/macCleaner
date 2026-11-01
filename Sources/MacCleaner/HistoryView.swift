@@ -25,6 +25,9 @@ struct HistoryView: View {
                         ForEach(entry.paths, id: \.self) { path in
                             Text(path).font(.caption).lineLimit(1).truncationMode(.middle).textSelection(.enabled)
                         }
+                        ForEach(entry.reinstallCommands ?? [], id: \.self) { command in
+                            Text(command).font(.caption.monospaced()).textSelection(.enabled)
+                        }
                     } label: {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("\(entry.module) · \(entry.date.formatted(date: .abbreviated, time: .shortened))").font(.headline)

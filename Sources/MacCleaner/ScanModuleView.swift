@@ -126,7 +126,11 @@ struct ScanModuleView: View {
     }
 
     private var confirmMessage: String {
-        let permanent = store.selectedItems.filter { $0.removal == .permanent || $0.removal == .dockerImage }.count
+        let permanent = store.selectedItems.filter { $0.removal == .permanent || $0.removal == .dockerImage || $0.removal == .commandLineTool }.count
+        // Une sélection composée uniquement d'outils : message dédié, sans mention de la Corbeille.
+        if !store.selectedItems.isEmpty, store.selectedItems.allSatisfy({ $0.removal == .commandLineTool }) {
+            return "\(formatBytes(store.selectedSize)) seront libérés. Ces outils seront désinstallés définitivement, sans passer par la Corbeille."
+        }
         let evicting = store.selectedItems.allSatisfy { $0.removal == .evictLocalCopy }
         if evicting { return "\(formatBytes(store.selectedSize)) d'espace libéré sur ce Mac. Les fichiers restent dans le cloud." }
         let base = "\(formatBytes(store.selectedSize)) seront envoyés à la Corbeille."

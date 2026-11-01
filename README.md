@@ -10,6 +10,7 @@ C'est une réimplémentation indépendante : il ne contient ni code, ni assets, 
 - Nettoyage : caches, Xcode, préférences cassées, corbeilles, résidus d'outils IA, modèles locaux, pièces jointes Mail.
 - Encombrement : gros fichiers, doublons, vieux téléchargements.
 - Outils de développement : dépendances de projets inactifs, caches de paquets et images Docker inutilisées.
+- Outils en ligne de commande : outils Homebrew, npm et uv, retirés avec leurs dépendances exclusives. La suppression est définitive et sa commande de réinstallation reste dans l'Historique.
 - Carte du disque : treemap navigable.
 - Désinstallation et restes d'applications.
 - Agents de démarrage et tâches de maintenance.
