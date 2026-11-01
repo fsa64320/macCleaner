@@ -396,6 +396,17 @@ final class RecordingRemover: FileRemoving, @unchecked Sendable {
         #expect(!requested.urls.contains { $0.scheme == "http" })
     }
 
+    @Test func testAppStoreLookupIgnoresIOSVersion() throws {
+        try makeApp("Store", id: "com.acme.store", extra: ["CFBundleShortVersionString": "1.0", "CFBundleVersion": "1"])
+        try write("Apps/Store.app/Contents/_MASReceipt/receipt")
+        let scanner = UpdateScanner(environment: env, fetch: { url in
+            let isMac = url.query?.contains("entity=desktopSoftware") == true
+            let version = isMac ? "1.0" : "2.0"
+            return Data(#"{"results":[{"version":"\#(version)","trackViewUrl":"https://apps.apple.com/app/id1"}]}"#.utf8)
+        }, brewOutdated: { nil })
+        #expect(scanner.scan().isEmpty)
+    }
+
     @Test func testHomebrewRejectsUnsafeTokens() {
         #expect(Homebrew.isValid(token: "openssl@3"))
         #expect(!Homebrew.isValid(token: "--force"))
