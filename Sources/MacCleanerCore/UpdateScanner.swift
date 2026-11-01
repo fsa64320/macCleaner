@@ -88,7 +88,11 @@ public struct UpdateScanner: Sendable {
 
     private func checkAppStore(_ app: InstalledApp) -> AppUpdate? {
         var components = URLComponents(string: "https://itunes.apple.com/lookup")
-        components?.queryItems = [URLQueryItem(name: "bundleId", value: app.bundleID), URLQueryItem(name: "country", value: "fr")]
+        // Sans `entity`, une app universelle renvoie sa version iOS, souvent plus récente que celle pour Mac.
+        components?.queryItems = [
+            URLQueryItem(name: "bundleId", value: app.bundleID), URLQueryItem(name: "country", value: "fr"),
+            URLQueryItem(name: "entity", value: "desktopSoftware"),
+        ]
         guard let url = components?.url, let data = fetch(url),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let result = (json["results"] as? [[String: Any]])?.first,
